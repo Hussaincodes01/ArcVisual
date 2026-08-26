@@ -1,0 +1,99 @@
+# The frozen evaluation set. Every pipeline change runs against this before merge;
+# without it, "improvements" are vibes.
+#
+# Phase 1: five arXiv papers with LaTeX source available, spanning notation-heavy
+# (transform_chain), results-heavy (plot_reveal), and architecture-heavy
+# (architecture_flow) shapes, so no single template carries the whole score.
+#
+# The set is FROZEN. Add papers when the phase widens (Phase 2 -> 30, Phase 3 -> 60);
+# never swap one out because it started failing — a paper that regresses is the
+# signal, not the noise.
+
+version: 1
+phase: 1
+
+papers:
+  - id: attention
+    url: https://arxiv.org/abs/1706.03762
+    title: Attention Is All You Need
+    field: ml
+    expect:
+      # These are floors, not predictions. A run below them fails the exit test.
+      min_sections: 6
+      min_concepts: 4
+      min_scenes: 3
+      archetypes_present: [transform_chain]
+    notes: >
+      The Phase 0 reference paper. Well understood, visually rich, and its
+      architecture figure is the canonical architecture_flow case.
+
+  - id: adam
+    url: https://arxiv.org/abs/1412.6980
+    title: "Adam: A Method for Stochastic Optimization"
+    field: ml
+    expect:
+      # An EXPECTED rejection, and valuable as such. This submission is a
+      # compiled PDF wrapped in a three-line pdfpages shim — there is no LaTeX
+      # body and never will be. Keeping it in the set proves two things Phase 1
+      # must get right: that we refuse cleanly instead of shipping a degraded
+      # article, and that the reason names the PDF rung of the resolution ladder
+      # rather than blaming the section parser.
+      # Remove this line when the Phase 3 Docling path lands; the paper should
+      # then process normally and the expectations below become floors.
+      rejected: source_unavailable
+    notes: >
+      PDF-only submission dressed as LaTeX. The clean-rejection case.
+
+  - id: batchnorm
+    url: https://arxiv.org/abs/1502.03167
+    title: "Batch Normalization: Accelerating Deep Network Training"
+    field: ml
+    expect:
+      min_sections: 5
+      min_concepts: 4
+      min_scenes: 2
+      archetypes_present: [transform_chain]
+    notes: >
+      Carries the derivation coverage that Adam was meant to provide: the
+      normalisation and backprop-through-normalisation steps are a genuine
+      transform_chain, and it has real LaTeX source.
+
+  - id: resnet
+    url: https://arxiv.org/abs/1512.03385
+    title: Deep Residual Learning for Image Recognition
+    field: cv
+    expect:
+      min_sections: 5
+      min_concepts: 4
+      min_scenes: 2
+      archetypes_present: [architecture_flow]
+    notes: >
+      Heavily results-driven with many tables. Included specifically to test
+      that triage does NOT propose an animation per table.
+
+  - id: bert
+    url: https://arxiv.org/abs/1810.04805
+    title: "BERT: Pre-training of Deep Bidirectional Transformers"
+    field: nlp
+    expect:
+      min_sections: 5
+      min_concepts: 4
+      min_scenes: 2
+    notes: >
+      Mostly prose and benchmark tables with comparatively little mathematics.
+      A paper where the right answer is FEWER animations; if triage returns the
+      cap here, triage is broken.
+
+  - id: vae
+    url: https://arxiv.org/abs/1312.6114
+    title: Auto-Encoding Variational Bayes
+    field: ml
+    expect:
+      min_sections: 5
+      min_concepts: 4
+      min_scenes: 2
+      archetypes_present: [transform_chain]
+    notes: >
+      Older submission, different LaTeX conventions, and derivation-heavy. The
+      ingest-robustness case: if the resolution ladder or the section parser is
+      brittle, this is where it shows.

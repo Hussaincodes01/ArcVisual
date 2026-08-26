@@ -1,0 +1,43 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+.env
+.env.local
+*.local
+
+# Eval cache and reports. The cached arXiv sources are large and re-fetchable;
+# the frozen paper LIST (eval/papers.yaml) is tracked, its downloads are not.
+eval-out/
+
+# Manim output
+media/
+*.mp4
+*.webm
+trace.json
+
+# Reader
+reader/node_modules/
+reader/.next/
+reader/out/
+reader/next-env.d.ts
+reader/.vercel
+
+.DS_Store
+.idea/
+.vscode/
+
+# Local run artifacts and stray images — regenerated, not source.
+*.db
+*.sqlite3
+*.jpeg
+*.jpg

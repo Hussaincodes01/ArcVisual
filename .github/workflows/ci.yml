@@ -1,0 +1,125 @@
+name: CI
+
+# The eval set runs on every PR before merge. Without that, "improvements" are
+# vibes — which is the plan's own phrasing and the reason this job exists.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: lint + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev,api,llm]"
+      - name: ruff
+        run: |
+          ruff check arcvisual eval tests
+          ruff format --check arcvisual eval tests
+      - name: mypy
+        run: mypy arcvisual
+        continue-on-error: true # advisory while the optional-import surface settles
+      - name: pytest
+        run: pytest -q --cov=arcvisual --cov-report=term-missing
+
+  migrations:
+    name: migrations apply and reverse
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: arcvisual
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+        ports: ["5432:5432"]
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/arcvisual
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev,api]"
+      # A migration that cannot be reversed is not a rollback plan.
+      - run: alembic upgrade head
+      - run: alembic downgrade base
+      - run: alembic upgrade head
+
+  eval:
+    name: eval set (gate 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      # Cache the arXiv sources so CI is deterministic and does not hammer arXiv.
+      - uses: actions/cache@v4
+        with:
+          path: eval-out/cache
+          key: eval-papers-${{ hashFiles('eval/papers.yaml') }}
+      # Gate 2 needs the Manim image, which belongs on Modal rather than in CI.
+      # Skipping it is recorded in the report as inconclusive, never as a pass.
+      - run: python -m eval.run --no-gate2 --assert-no-code-changes
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: eval-out/report.json
+
+  render:
+    name: render snapshots (templates)
+    # Minutes per template, so not on every PR. This is the plan's mitigation for
+    # "Manim CE version drift breaking templates" and the only job that executes a
+    # template body — it is also what keeps each template's estimate_duration in
+    # step with its build().
+    if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'render')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: system deps for Manim
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libcairo2-dev libpango1.0-dev texlive texlive-latex-extra dvisvgm
+      - run: pip install -e ".[dev,render]"
+      - run: pytest tests/test_render.py -m slow -v
+
+  reader:
+    name: reader typecheck + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: reader
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: reader/package.json
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run build
