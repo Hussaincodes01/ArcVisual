@@ -17,6 +17,7 @@ Subclasses declare their differences rather than reimplementing an HTTP client.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, TypeVar
@@ -264,9 +265,7 @@ class OpenAICompatProvider:
             # The schema travels with the request and is billed with it, but the
             # caller estimating from message length cannot see it. Measured at ~665
             # tokens for AnalysisOut — enough to push a request over the ceiling.
-            import json as _json
-
-            prompt_tokens += len(_json.dumps(response_format)) // 4
+            prompt_tokens += len(json.dumps(response_format)) // 4
         if meter is not None:
             max_tokens = meter.clamp(max_tokens, prompt_tokens)
 
@@ -353,7 +352,14 @@ class OpenAICompatProvider:
             )
         if response.status_code == 400 and "json_validate_failed" in response.text:
             if meter is not None:
-                meter.settle(reserved, usage_total(response))
+                # Charge the FULL reservation, do not refund. The model generated
+                # until it ran out of budget — that is what "did not complete within
+                # the output budget" means — so those tokens were spent even though
+                # the server discarded the result. This body carries no `usage` block
+                # to read them from, and refunding on that absence let the meter
+                # believe capacity existed that the server had already consumed:
+                # every retry then fired straight into a 429.
+                meter.settle(reserved, reserved)
             # Constrained decoding ran past the output budget and stopped mid-object,
             # so the server rejected its own generation. Retryable rather than fatal:
             # reply length varies run to run for the same prompt, and the identical
@@ -383,19 +389,6 @@ class OpenAICompatProvider:
             cost_usd=0.0,
             attributed=False,
         )
-
-
-def usage_total(response: Any) -> int:
-    """Tokens a failed request still consumed, for refunding the meter accurately.
-
-    A rejected generation is still billed for what it produced, so refunding the whole
-    reservation would let the meter drift above the real allowance and invite 429s.
-    """
-    try:
-        raw = (response.json().get("usage") or {}) if response.text else {}
-    except (ValueError, AttributeError):
-        return 0
-    return int(raw.get("prompt_tokens") or 0) + int(raw.get("completion_tokens") or 0)
 
 
 def _harden_schema(schema: dict) -> None:

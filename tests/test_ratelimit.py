@@ -81,9 +81,13 @@ def test_clamp_keeps_the_ask_under_the_ceiling() -> None:
     """The bug this prevents: Groq charges the *requested* budget on arrival, so
     asking 8192 of an 8000 TPM key is a certain 413, not a long answer."""
     budget = TokenBudget(tpm=8000)
-    # 700 estimated -> 805 padded + 256 headroom = 1060 reserved, leaving 6940.
-    assert budget.clamp(8192, prompt_tokens=700) == 6940
+    # 700 estimated -> 805 padded + 256 headroom = 1061 held back, against a
+    # spendable 7,200 (90% of 8,000), leaving 6,140. The safety margin lives here, in
+    # the size of the ask, rather than in the bucket's capacity — a bucket smaller
+    # than the server's allowance under-counts requests sized near that allowance.
+    assert budget.clamp(8192, prompt_tokens=700) == 6140
     assert budget.clamp(1000, prompt_tokens=700) == 1000  # already fits: untouched
+    assert budget.capacity == 8000, "the bucket must hold the server's full allowance"
 
 
 def test_clamp_pads_an_optimistic_prompt_estimate() -> None:
@@ -530,3 +534,124 @@ def test_a_nearly_clear_daily_window_is_waited_out_not_abandoned() -> None:
     client.responses[0].text = short
     with pytest.raises(RetryableProviderError):
         _Prov(client, meter=TokenBudget(tpm=8000))._chat("m", "s", "u", 1000)
+
+
+def test_a_truncated_generation_is_charged_not_refunded() -> None:
+    """`json_validate_failed` means the model generated until its budget ran out.
+
+    Those tokens were spent even though the server discarded the result, and the
+    error body carries no `usage` block to read them from. Refunding on that absence
+    left the meter believing it had capacity the server had already consumed, so
+    every retry fired straight into a 429.
+    """
+    body = '{"error":{"code":"json_validate_failed","failed_generation":"{...."}}'
+    meter = TokenBudget(tpm=8000)
+    before = meter._tokens
+    client = _FakeClient([_Resp(400)])
+    client.responses[0].text = body
+
+    with pytest.raises(RetryableProviderError):
+        _Prov(client, meter=meter)._chat("m", "s", "u", 2000)
+
+    spent = before - meter._tokens
+    assert spent > 0, "a truncated generation must cost the meter something"
+    assert spent >= 2000, (
+        f"the full reservation should be charged, not refunded; only {spent} was"
+    )
+
+
+def test_reservations_are_never_silently_shrunk() -> None:
+    """`acquire` used to clamp to a capacity below the server's allowance, so a
+    request sized near that allowance reserved less than it went on to ask for."""
+    budget = TokenBudget(tpm=8000)
+    assert budget.acquire(7900, timeout_s=1) == 7900
+
+
+def test_a_tiny_budget_still_sends_quotable_text() -> None:
+    """Headings alone are not a degraded prompt, they are a broken one.
+
+    With no quotable text the model can only answer from memory, every quote fails to
+    ground, and the job reports zero concepts with nothing in the logs explaining
+    why — the exact silent failure that cost a full debugging cycle on the real
+    Transformer paper.
+    """
+    from arcvisual.analyze.prompts import trim_body
+    from arcvisual.ingest.arxiv import build_storyboard
+    from tests.test_review_fixes import metadata, paper_tarball
+
+    sb = build_storyboard(metadata(), paper_tarball())
+    analysable = [s for s in sb.sections if s.raw.strip()]
+
+    for budget in (0, 1, 100, 500):
+        text, _ = trim_body(sb, budget)
+        # Some real prose from some section must survive, not just its heading.
+        assert any(
+            s.raw[:200].strip() and s.raw[:200].strip() in text for s in analysable
+        ), f"budget {budget} sent no quotable text at all"
+
+
+def test_dotenv_parsing_and_precedence(tmp_path, monkeypatch) -> None:
+    """`.env` loading is how every credential reaches the app, and it was untested.
+
+    The precedence rule is the part worth pinning: a real environment variable must
+    beat the file, or `ARCVISUAL_PROVIDER=groq python -m ...` would be silently
+    ignored and overriding anything for one run would mean editing a file and
+    remembering to edit it back.
+    """
+    import os
+
+    from arcvisual.config import load_dotenv
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# a comment\n"
+        "\n"
+        "A_PLAIN=hello world\n"
+        'B_DOUBLE="quoted value"\n'
+        "C_SINGLE='single quoted'\n"
+        "export D_EXPORTED=exported\n"
+        "E_EMPTY=\n"
+        "F_EQUALS=key=with=equals\n"
+        "G_ALREADY_SET=from_file\n",
+        encoding="utf-8",
+    )
+    for key in ("A_PLAIN", "B_DOUBLE", "C_SINGLE", "D_EXPORTED", "E_EMPTY", "F_EQUALS"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("ARCVISUAL_NO_DOTENV", raising=False)
+    monkeypatch.setenv("G_ALREADY_SET", "from_environment")
+
+    load_dotenv(env_file)
+
+    assert os.environ["A_PLAIN"] == "hello world"
+    assert os.environ["B_DOUBLE"] == "quoted value", "matched quotes are stripped"
+    assert os.environ["C_SINGLE"] == "single quoted"
+    assert os.environ["D_EXPORTED"] == "exported", "an `export ` prefix is tolerated"
+    assert os.environ["E_EMPTY"] == ""
+    assert os.environ["F_EQUALS"] == "key=with=equals", "only the FIRST = splits"
+    assert os.environ["G_ALREADY_SET"] == "from_environment", (
+        "a real environment variable must win over the file"
+    )
+
+
+def test_dotenv_can_be_disabled(tmp_path, monkeypatch) -> None:
+    """The suite sets this so a developer's real keys and provider choice cannot leak
+    into a test run — a suite whose cost and outcome depend on the machine it runs on
+    is not a suite."""
+    import os
+
+    from arcvisual.config import load_dotenv
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("SHOULD_NOT_APPEAR=1\n", encoding="utf-8")
+    monkeypatch.delenv("SHOULD_NOT_APPEAR", raising=False)
+    monkeypatch.setenv("ARCVISUAL_NO_DOTENV", "1")
+
+    assert load_dotenv(env_file) == 0
+    assert "SHOULD_NOT_APPEAR" not in os.environ
+
+
+def test_dotenv_missing_file_is_not_an_error(tmp_path, monkeypatch) -> None:
+    from arcvisual.config import load_dotenv
+
+    monkeypatch.delenv("ARCVISUAL_NO_DOTENV", raising=False)
+    assert load_dotenv(tmp_path / "nope.env") == 0

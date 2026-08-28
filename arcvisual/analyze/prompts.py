@@ -266,6 +266,23 @@ def _whole_sections(sections: list, char_budget: int) -> tuple[str, int]:
         keep[section.id] = take
         spent += take + overhead
 
+    if not keep and sections:
+        # A budget too small for even one quotable section would otherwise return
+        # headings alone. That is not a degraded prompt, it is a broken one: with no
+        # quotable text the model can only answer from memory, every quote fails to
+        # ground, and the job reports zero concepts with nothing explaining why. Send
+        # one section anyway and say so — an over-long prompt fails loudly at the
+        # provider, which is far easier to diagnose than silent emptiness.
+        best = min(sections, key=_section_value)
+        keep[best.id] = max(char_budget, _MIN_QUOTABLE_CHARS)
+        log.warning(
+            "analyze budget of %d chars fits no complete section (minimum %d); "
+            "sending %s alone. Raise the provider's prompt_char_budget.",
+            char_budget,
+            _MIN_QUOTABLE_CHARS,
+            best.id,
+        )
+
     parts: list[str] = []
     omitted: list[str] = []
     dropped = 0

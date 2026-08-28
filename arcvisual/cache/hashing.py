@@ -103,8 +103,14 @@ def source_sha(obj: Any) -> str:
         return digest
 
 
-#: Holds references for objects whose ``id()`` keys the cache above. Bounded in
-#: practice: the callers are module and class objects, which live for the process.
+#: Holds references for objects whose ``id()`` keys the cache above, so a collected
+#: object cannot have its address reused and serve another object's digest.
+#:
+#: **Invariant: only long-lived objects may be passed to source_sha.** Today that is
+#: the three call sites' template modules and ``ArcSceneMixin`` — a handful, alive for
+#: the process. Passing a dynamically created class would grow this list without
+#: bound, and this codebase has such a factory in ``templates.base.make_scene``, so
+#: the invariant is worth stating rather than assuming.
 _SOURCE_KEEPALIVE: list[Any] = []
 
 

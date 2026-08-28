@@ -137,8 +137,10 @@ class TokenBudget:
     on the same key.
     """
 
-    #: Leave this fraction of the allowance unspent. Groq charges the *requested*
-    #: budget on arrival, and several lanes can arrive between refill ticks.
+    #: Held back when deciding how much to ASK for, not when deciding how much the
+    #: bucket can hold. The two are different: the bucket must be able to hold what
+    #: the server is willing to admit, or a request sized right up to the server's
+    #: limit could never be reserved locally and would be silently under-counted.
     SAFETY_FRACTION = 0.90
 
     #: Multiplier on the caller's prompt estimate before reserving against the
@@ -158,7 +160,12 @@ class TokenBudget:
         self.tpm = tpm
         self.window_s = window_s
         self._lock = threading.Condition()
-        self.capacity = max(0, int(tpm * self.SAFETY_FRACTION))
+        # The bucket holds the server's FULL allowance. Shrinking it here was a quiet
+        # accounting hole: `acquire` clamps a reservation to capacity, so a request
+        # sized between 90% and 100% of the allowance reserved less than it went on to
+        # ask the server for, and the meter believed it had room it had already spent.
+        # The safety margin belongs in `clamp`, which decides the size of the ask.
+        self.capacity = max(0, tpm)
         self._tokens = float(self.capacity)
         self._last_refill = time.monotonic()
         self._server_remaining: int | None = None
@@ -201,7 +208,8 @@ class TokenBudget:
         if self.tpm <= 0:
             return requested
         padded = int(prompt_tokens * self.ESTIMATE_MARGIN) + self.HEADROOM_TOKENS
-        headroom = max(self.tpm - padded, 256)
+        spendable = int(self.tpm * self.SAFETY_FRACTION)
+        headroom = max(spendable - padded, 256)
         return max(1, min(requested, headroom))
 
     def acquire(self, tokens: int, timeout_s: float = 180.0) -> int:
