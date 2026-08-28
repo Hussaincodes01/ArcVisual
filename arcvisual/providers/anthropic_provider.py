@@ -60,6 +60,9 @@ class AnthropicProvider:
         #: request shape and the model ids are unchanged — only the host moves —
         #: which is why this is a base-URL setting rather than a fourth provider.
         self._base_url = cfg.anthropic_base_url
+        #: Sent as a default header when set. An identity-linked key — one issued to
+        #: a person rather than to a workspace — is refused outright without it.
+        self._workspace_id = cfg.anthropic_workspace_id
 
     # -- plumbing ---------------------------------------------------------- #
 
@@ -73,6 +76,7 @@ class AnthropicProvider:
             note=(
                 "constrained structured output, 1h prompt cache, exact per-token cost"
                 + (f"; routed via {self._base_url}" if self._base_url else "")
+                + (f"; workspace {self._workspace_id}" if self._workspace_id else "")
             ),
         )
 
@@ -87,11 +91,16 @@ class AnthropicProvider:
         if self._client is None:
             import anthropic
 
-            self._client = (
-                anthropic.Anthropic(base_url=self._base_url)
-                if self._base_url
-                else anthropic.Anthropic()
-            )
+            kwargs: dict[str, Any] = {}
+            if self._base_url:
+                kwargs["base_url"] = self._base_url
+            if self._workspace_id:
+                # A default header rather than a per-call one: every request needs
+                # it, and threading it through each call site is how one gets missed.
+                kwargs["default_headers"] = {
+                    "anthropic-workspace-id": self._workspace_id
+                }
+            self._client = anthropic.Anthropic(**kwargs)
         return self._client
 
     def healthcheck(self, timeout_s: float = 30.0):

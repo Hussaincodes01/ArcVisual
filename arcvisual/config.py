@@ -337,6 +337,12 @@ class Settings:
     #: Optional. Any Anthropic-compatible gateway (e.g. Dedalus Labs, a proxy).
     #: Same SDK, same request shape, same model ids — only the host changes.
     anthropic_base_url: str = ""
+    #: Required when the key is *identity-linked* (issued to a person rather than to
+    #: a workspace). Such a key is rejected with
+    #: "anthropic-workspace-id is required when authenticating with an
+    #: identity-linked API key" until the header names the workspace to act in.
+    #: Empty for an ordinary workspace key, where sending it would be wrong.
+    anthropic_workspace_id: str = ""
     r2_account_id: str = ""
     r2_access_key_id: str = ""
     r2_secret_access_key: str = ""
@@ -453,6 +459,7 @@ def settings() -> Settings:
         provider=env("ARCVISUAL_PROVIDER", "auto"),
         anthropic_api_key=env("ANTHROPIC_API_KEY", ""),
         anthropic_base_url=env("ANTHROPIC_BASE_URL", ""),
+        anthropic_workspace_id=env("ANTHROPIC_WORKSPACE_ID", ""),
         r2_account_id=env("R2_ACCOUNT_ID", ""),
         r2_access_key_id=env("R2_ACCESS_KEY_ID", ""),
         r2_secret_access_key=env("R2_SECRET_ACCESS_KEY", ""),
