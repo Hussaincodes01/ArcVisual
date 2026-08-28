@@ -195,3 +195,84 @@ def test_custom_scene_is_offered_to_the_analyzer() -> None:
 
     assert "custom_scene" in _available_archetypes()
     assert "custom_scene" in archetype_help()
+
+
+# -- coercions found by running a real model -------------------------------- #
+
+
+def test_a_mixed_indent_body_is_normalised() -> None:
+    """A real model wrote its body as if already inside ``def build``, with a
+    comment at column 0 and the code at four spaces.
+
+    ``textwrap.dedent`` takes the longest common prefix over non-blank lines, and a
+    comment is a non-blank line — so the prefix was "" and nothing was removed. The
+    emitter then added four more spaces to every line and the module failed to parse
+    with "unexpected indent". A whole scene lost to whitespace.
+    """
+    import ast
+
+    body = (
+        "# Setup\n"
+        "    hw, hh = scene.safe_frame()\n"
+        "\n"
+        "    # Moment 1\n"
+        '    title = m.Text("Attention", font_size=36)\n'
+        "    scene.play(m.Write(title))\n"
+    )
+    out = CustomSceneOut(body=body, captions=["x"])
+    ast.parse(out.body)  # raises if the normalisation failed
+    assert out.body.startswith("# Setup")
+
+
+def test_redundant_preamble_is_stripped_but_forbidden_imports_are_not() -> None:
+    """Models reliably restate the preamble they were told not to write.
+
+    Observed on consecutive real replies: ``import math``, shadowing the module-level
+    import (F811 plus F401 for the now-unused original), then ``m = manim_mod()``,
+    shadowing the binding ``build`` opens with (F811 again). Neither says anything
+    about the animation.
+
+    The safety half matters more than the convenience half: only what we actually
+    provide is stripped, so a forbidden import is still there for Gate 1 to refuse.
+    Laundering ``import os`` into a passing scene would make the whole allowlist
+    decorative.
+    """
+    body = (
+        "import math\n"
+        "m = manim_mod()\n"
+        "import os\n"
+        "ys = [math.exp(-x) for x in [0.0, 1.0]]\n"
+        "scene.play(m.FadeIn(m.Dot()))\n"
+    )
+    out = CustomSceneOut(body=body, captions=["x"])
+    assert "import math" not in out.body
+    assert "manim_mod()" not in out.body
+    assert "import os" in out.body, "a forbidden import must survive to reach Gate 1"
+
+    source = render_custom_module(_spec(), out)
+    result, _ = g1_static.run(source, archetype=None)
+    assert not result.passed, "Gate 1 must still refuse the smuggled import"
+
+
+def test_math_is_available_to_a_generated_body() -> None:
+    """Manim is a drawing library with no maths functions: a real scene plotting a
+    softmax curve reached for ``m.exp`` and raised at render time, after four
+    animations had already been drawn. The emitted module imports ``math`` so the
+    body has somewhere legitimate to get it."""
+    out = CustomSceneOut(
+        body="ys = [math.exp(-x) for x in [0.0, 1.0]]\nscene.play(m.FadeIn(m.Dot(ys)))",
+        captions=["x"],
+    )
+    source = render_custom_module(_spec(), out)
+    assert "import math" in source
+    result, _ = g1_static.run(source, archetype=None)
+    assert result.passed, result.findings
+
+
+def test_the_prompt_spells_out_the_m_prefix_on_constants() -> None:
+    """A real model wrote bare ``ORIGIN`` and Gate 1 refused the scene for an
+    undefined name. The surface listed constants without their prefix, which invited
+    exactly that — the most common way a generated body fails."""
+    system, _ = build_prompt(_spec(), title="T", concept="c", quote=QUOTE, latex=True)
+    assert "m.ORIGIN" in system
+    assert "math.exp" in system, "the maths surface must be advertised too"

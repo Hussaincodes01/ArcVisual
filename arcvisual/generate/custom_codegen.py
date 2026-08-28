@@ -97,13 +97,97 @@ class CustomSceneOut(BaseModel):
         fence = re.match(r"^```(?:python)?\s*\n(.*?)\n?```$", text, re.DOTALL)
         if fence:
             text = fence.group(1)
-        # A `def build(...)` wrapper: drop the line and dedent what follows.
+        # A `def build(...)` wrapper: drop the line and keep what follows.
         lines = text.splitlines()
         for i, line in enumerate(lines):
             if re.match(r"^\s*def\s+build\s*\(", line):
-                text = textwrap.dedent("\n".join(lines[i + 1 :]))
+                text = "\n".join(lines[i + 1 :])
                 break
-        return textwrap.dedent(text).strip("\n")
+        return _normalise_indent(_drop_redundant_preamble(text)).strip("\n")
+
+
+#: Modules the emitted module already imports. A body that imports one of these
+#: is not doing anything wrong — it is restating something already true.
+_PROVIDED_MODULES = frozenset({"math", "manim"})
+
+#: The binding the emitted ``build`` already opens with.
+_REBINDS_MANIM = re.compile(r"^m\s*=\s*manim_mod\s*\(\s*\)\s*$")
+
+
+def _drop_redundant_preamble(text: str) -> str:
+    """Remove lines that restate what the generated module already set up.
+
+    Models reliably write the preamble they were told not to. Observed on real
+    replies, twice in a row: ``import math``, which shadowed the module-level import
+    and failed Gate 1 with F811 for the redefinition plus F401 for the now-unused
+    original; then ``m = manim_mod()``, which shadowed the binding ``build`` opens
+    with and failed F811 again. Neither says anything about the animation, and both
+    would otherwise burn a repair attempt on a habit.
+
+    **Only what we actually provide is stripped.** ``import os`` stays exactly where
+    it is, so the allowlist still refuses it and the security finding still fires —
+    the point is to forgive a redundant restatement, never to quietly launder a
+    forbidden import into a passing scene. A test puts ``import os`` through this
+    path and asserts Gate 1 still rejects it.
+    """
+    kept = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        imported = re.match(r"^(?:import|from)\s+([A-Za-z_][\w.]*)", stripped)
+        if imported and imported.group(1).split(".")[0] in _PROVIDED_MODULES:
+            continue
+        if _REBINDS_MANIM.match(stripped):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _normalise_indent(text: str) -> str:
+    """Strip a uniform leading indent, tolerating comments at column 0.
+
+    ``textwrap.dedent`` computes the longest common prefix over every non-blank
+    line, and a comment is a non-blank line. A real model returned this, having
+    written the body as if it were already inside ``def build``:
+
+        # Setup
+            hw, hh = scene.safe_frame()
+
+    The common prefix is "" because of the comment, so dedent removed nothing, the
+    emitter added four more spaces to every line, and the module failed to parse
+    with "unexpected indent at line 20" — a whole scene lost to whitespace.
+
+    So the indent is measured over CODE lines only and then applied to every line,
+    including the comments. The result is checked by actually parsing it: if the
+    normalised text does not compile but the original does, the original wins,
+    because a clever transformation that breaks working code is worse than none.
+    """
+    lines = text.splitlines()
+    code_indents = [
+        len(line) - len(line.lstrip())
+        for line in lines
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not code_indents:
+        return textwrap.dedent(text)
+    shift = min(code_indents)
+    if shift:
+        lines = [line[min(shift, len(line) - len(line.lstrip())) :] for line in lines]
+    candidate = "\n".join(lines)
+
+    if _parses(candidate):
+        return candidate
+    for fallback in (textwrap.dedent(text), text):
+        if _parses(fallback):
+            return fallback
+    return candidate  # nothing parses; let Gate 1 report it properly
+
+
+def _parses(text: str) -> bool:
+    try:
+        ast.parse(text)
+    except (SyntaxError, ValueError):
+        return False
+    return True
 
 
 SYSTEM = """\
@@ -121,9 +205,10 @@ The body of `build(scene, params)` — Python statements at one level of \
 indentation. Nothing else. No `def` line, no imports, no markdown fence, no \
 explanation outside the JSON.
 
-`m` is already bound to the manim module. Reach for everything through it: \
-`m.Text`, `m.Create`, `m.UP`. There is no other module available and no way to \
-import one.
+`m` is already bound to the manim module and `math` to the standard library's \
+maths module. Reach for drawing through `m.` (`m.Text`, `m.Create`, `m.UP`) and \
+for arithmetic through `math.` (`math.exp`, `math.sqrt`). Nothing else is \
+available and there is no way to import anything.
 
 AVAILABLE MANIM SURFACE
 {surface}
@@ -234,6 +319,8 @@ claim     : {claim}
 grounded  : {section_id}[{span_start}:{span_end}]
 plan      : {plan}
 """
+
+import math
 
 from arcvisual.templates.base import make_scene, manim_mod
 from arcvisual.templates.custom import Params

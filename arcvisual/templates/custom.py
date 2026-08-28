@@ -100,8 +100,19 @@ Animations: Create, Write, FadeIn, FadeOut, Transform, ReplacementTransform,
 Layout:     .next_to, .shift, .move_to, .to_edge, .arrange, .arrange_in_grid,
             .scale, .set_color, .set_opacity, .set_fill, .set_stroke, .rotate,
             .get_center, .get_top, .get_bottom, .get_left, .get_right, .copy
-Constants:  UP, DOWN, LEFT, RIGHT, ORIGIN, PI, TAU, DEGREES, and the colour
-            names (BLUE, RED, GREEN, YELLOW, ORANGE, PURPLE, TEAL, WHITE, GREY)
+Constants:  m.UP, m.DOWN, m.LEFT, m.RIGHT, m.ORIGIN, m.PI, m.TAU, m.DEGREES, and
+            the colours m.BLUE, m.RED, m.GREEN, m.YELLOW, m.ORANGE, m.PURPLE,
+            m.TEAL, m.WHITE, m.GREY
+
+EVERY name above needs the `m.` prefix, constants included. Bare `ORIGIN` or
+`UP` is an undefined name: Gate 1 rejects it and the scene is lost. This is the
+single most common way a generated body fails, which is why the constants are
+spelled out with their prefix here rather than left to inference.
+
+Maths:      `math` is imported. Use `math.exp`, `math.sqrt`, `math.log`,
+            `math.sin`, `math.cos`, `math.pi`. Manim is a drawing library and has
+            NO maths functions -- `m.exp` does not exist and raises at render
+            time, after the animations before it have already been drawn.
 """
 
 #: The helpers the scene object exposes. These are not optional niceties — they
