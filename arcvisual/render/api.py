@@ -349,11 +349,21 @@ def _allowed_origins() -> list[str]:
 
 
 def _cached_job(session, arxiv_id: str):
+    """The newest complete job for this paper whose media is STILL THERE.
+
+    ``state == "complete"`` is a claim about the past, not evidence about the
+    present. The bytes live outside the database, so anything that clears the media
+    store — a disk sweep, a fresh checkout, someone deleting a directory — leaves
+    rows that describe artifacts nobody can fetch. Trusting the row alone made the
+    reader serve an article of 404s, permanently: every later request hit the same
+    cache entry and never re-rendered. The project's own test conventions say it
+    best — assert on effects, not on status fields.
+    """
     from sqlalchemy import select
 
     from arcvisual.db.models import Job, Paper
 
-    return session.scalars(
+    candidates = session.scalars(
         select(Job)
         .join(Paper, Paper.id == Job.paper_id)
         .where(
@@ -362,7 +372,40 @@ def _cached_job(session, arxiv_id: str):
             Job.state == "complete",
         )
         .order_by(Job.created_at.desc())
-    ).first()
+    ).all()
+    for job in candidates:
+        if _media_present(session, job):
+            return job
+        log.info("cached job %s discarded: its media is no longer on disk", job.id)
+    return None
+
+
+def _media_present(session, job) -> bool:
+    """Whether every passed scene in ``job`` still has fetchable bytes.
+
+    Only PASSED scenes are checked. A degraded or failed scene legitimately has no
+    video, and requiring one would make every partially-successful article
+    uncacheable — which is most of them.
+    """
+    from sqlalchemy import select
+
+    from arcvisual.db.models import ArtifactRow, SceneRow
+    from arcvisual.render import storage
+
+    rows = session.scalars(
+        select(SceneRow).where(SceneRow.job_id == job.id, SceneRow.state == "passed")
+    ).all()
+    if not rows:
+        return True  # nothing to serve, nothing to go missing
+
+    for scene in rows:
+        content_hash = getattr(scene, "content_hash", None)
+        if not content_hash:
+            continue
+        artifact = session.get(ArtifactRow, content_hash)
+        if artifact is None or not storage.has_scene_local(artifact.mp4_key):
+            return False
+    return True
 
 
 def _slug_of(session, job) -> str | None:

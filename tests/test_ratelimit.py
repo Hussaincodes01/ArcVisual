@@ -655,3 +655,59 @@ def test_dotenv_missing_file_is_not_an_error(tmp_path, monkeypatch) -> None:
 
     monkeypatch.delenv("ARCVISUAL_NO_DOTENV", raising=False)
     assert load_dotenv(tmp_path / "nope.env") == 0
+
+
+def test_the_polled_job_id_survives_a_resubmission(tmp_path) -> None:
+    """Re-submitting a paper must not delete the id the client is polling.
+
+    `(paper_id, pipeline_version)` is unique, and the queued placeholder starts with
+    `paper_id=None` — so the collision only appears once `persist_job` resolves the
+    paper. Resolving it by folding into the OLDER row deleted the placeholder
+    mid-run: the reader's waiting room polled itself into `404 unknown_job` on every
+    re-submission of a paper already seen, while the work completed perfectly. The
+    placeholder's id is the one already handed out, so it is the one that must live.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from arcvisual.db import repo
+    from arcvisual.db.models import Base, Job
+    from arcvisual.ingest.arxiv import build_storyboard
+    from arcvisual.render.pipeline import run_job
+    from tests.test_review_fixes import metadata, paper_tarball
+
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'jobs.db'}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    sb = build_storyboard(metadata(), paper_tarball())
+    result = run_job(storyboard=sb, run_gate2=False)
+    url = "https://arxiv.org/abs/1706.03762"
+
+    # First submission, exactly as the API does it.
+    with Session() as session:
+        first = repo.create_queued_job(
+            session, url=url, arxiv_id="1706.03762", submitted_by=None
+        )
+        repo.persist_job(result, session=session, job_id=first.id)
+        session.commit()
+        first_id = first.id
+
+    # Second submission of the same paper at the same pipeline version.
+    with Session() as session:
+        second = repo.create_queued_job(
+            session, url=url, arxiv_id="1706.03762", submitted_by=None
+        )
+        second_id = second.id
+        repo.persist_job(result, session=session, job_id=second_id)
+        session.commit()
+
+    assert first_id != second_id
+    with Session() as session:
+        survivor = session.get(Job, second_id)
+        assert survivor is not None, (
+            "the id handed to the client was deleted; its waiting room now 404s"
+        )
+        assert survivor.state == "complete"
+        # And the superseded row is gone rather than accumulating duplicates.
+        assert session.get(Job, first_id) is None

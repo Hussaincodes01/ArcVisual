@@ -373,12 +373,24 @@ def _artifact_for(
     # is exactly what a run with no R2 credentials did.
     video = getattr(outcome, "video_path", None)
     stored_bytes = 0
+    written: dict[str, int] = {}
     if video is not None:
         try:
             from arcvisual.render import storage
 
+            # Derive the poster and WebM before storing. Without this the local path
+            # writes scene.mp4 alone while the artifact record still advertises
+            # poster_key and webm_key, so the reader renders a <video> whose poster
+            # 404s on every scene. `derive_assets` was only ever called on the Modal
+            # path, so the whole local experience shipped with broken posters.
+            assets = None
+            try:
+                assets = storage.derive_assets(video, video.parent / "derived")
+            except Exception as exc:  # ffmpeg absent or a codec missing
+                log.info("could not derive poster/webm for %s: %s", gen.scene.spec.id, exc)
+
             # save_scene_local returns {key: bytes_written}, not paths.
-            written = storage.save_scene_local(video, keys)
+            written = storage.save_scene_local(video, keys, assets=assets)
             stored_bytes = sum(written.values())
             log.info(
                 "stored %s assets (%s bytes) for %s",
@@ -397,12 +409,20 @@ def _artifact_for(
                 video.parent.rmdir()
             except OSError:
                 pass
+    # Advertise ONLY what was actually written. A key for a file that does not exist
+    # is worse than a missing key: the reader has no way to tell them apart, so it
+    # emits a <source> and a poster that 404 rather than falling back gracefully.
+    # mp4_key and poster_key are required by the schema, so they keep their nominal
+    # value; the optional webm_key is dropped unless its file landed.
+    advertised = dict(keys)
+    if written and keys.get("webm_key") not in written:
+        advertised["webm_key"] = None
     return Artifact(
         content_hash=ch,
         duration_s=float(payload.get("rendered_duration_s") or gen.scene.spec.duration_s),
         quality="draft",
         bytes=stored_bytes,
-        **keys,
+        **advertised,
     )
 
 

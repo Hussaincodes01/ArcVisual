@@ -32,6 +32,7 @@ from typing import Any
 import yaml
 
 from arcvisual.config import PIPELINE_VERSION, settings
+from arcvisual.console import enable_unicode_output
 from arcvisual.ingest.arxiv import (
     build_storyboard,
     extract_arxiv_id,
@@ -400,6 +401,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", type=Path, help="write the full report here")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
+
+    # cp1252 consoles cannot encode the em-dash in the report banner.
+    enable_unicode_output()
 
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,

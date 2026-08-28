@@ -128,19 +128,27 @@ def persist_job(
         ).first()
     else:
         # A queued row already exists for this run; claim it for the resolved paper.
-        # If an identical (paper, version) row exists from an earlier run, that one
-        # wins the unique constraint, so fold into it and drop the placeholder.
-        existing = session.scalars(
+        #
+        # (paper_id, pipeline_version) is unique, so a previous run of the same paper
+        # collides with this placeholder. Resolve it by dropping the SUPERSEDED row
+        # and keeping the placeholder, not the other way round: the placeholder's id
+        # is the one already handed to the client and being polled. Folding into the
+        # older row deleted that id mid-run, and the reader's waiting room polled
+        # itself into `404 unknown_job` for every re-submission of a paper it had
+        # already seen — while the work itself completed perfectly.
+        #
+        # Nothing is lost by preferring the placeholder: this run replaces the
+        # previous run's scene rows anyway, and they cascade from the job row.
+        superseded = session.scalars(
             select(Job).where(
                 Job.paper_id == paper.id,
                 Job.pipeline_version == PIPELINE_VERSION,
                 Job.id != job.id,
             )
         ).first()
-        if existing is not None:
-            session.delete(job)
+        if superseded is not None:
+            session.delete(superseded)
             session.flush()
-            job = existing
 
     if job is None:
         job = Job(paper_id=paper.id, pipeline_version=PIPELINE_VERSION)

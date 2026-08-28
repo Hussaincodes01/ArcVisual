@@ -28,6 +28,8 @@ import argparse
 import logging
 import os
 
+from arcvisual.console import enable_unicode_output
+
 log = logging.getLogger(__name__)
 
 DEFAULT_DB = "sqlite+pysqlite:///./arcvisual-local.db"
@@ -106,6 +108,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--workers", type=int, default=2, help="concurrent jobs")
     args = parser.parse_args(argv)
+
+    # Before the banner: on a default Windows console stdout is cp1252, and the
+    # box-drawing rule below raises UnicodeEncodeError two lines before uvicorn
+    # starts — so the server never binds its port.
+    enable_unicode_output()
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s"
