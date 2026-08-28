@@ -95,6 +95,14 @@ _ARCHETYPE_HELP = {
         "a model or system diagram where the ORDER of operations and the path "
         "data takes is the thing the static figure cannot show"
     ),
+    "custom_scene": (
+        "ANY idea the three shapes above would misrepresent — a mechanism, a "
+        "counterexample, a geometric intuition, an attention pattern, a scaling "
+        "argument, an algorithm walking through its own data. A bespoke animation "
+        "is written for it. PREFER THIS over forcing an idea into a chain, a plot "
+        "or a box diagram it does not really fit: a diagram of the wrong shape "
+        "teaches the wrong thing, and three shapes cannot cover a whole field"
+    ),
 }
 
 

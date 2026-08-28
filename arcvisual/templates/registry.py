@@ -29,6 +29,11 @@ _TEMPLATE_MODULES = (
     "arcvisual.templates.transform_chain",
     "arcvisual.templates.plot_reveal",
     "arcvisual.templates.architecture_flow",
+    # Registered last, and deliberately registered at all: without it the analyzer
+    # never offers `custom_scene` as a choice, and every paper is forced into one of
+    # the three fixed shapes above — which is exactly how a reader ends up watching
+    # the same three animations for every paper.
+    "arcvisual.templates.custom",
 )
 
 

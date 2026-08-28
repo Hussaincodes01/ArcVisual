@@ -498,6 +498,26 @@ def clamp_text(limit: int):
     return _clamp
 
 
+def clamp_each(limit: int):
+    """An ``after`` validator that trims every string in a list.
+
+    ``clamp_text`` takes a single string, so applying it to a ``list[str]`` field
+    silently does nothing — the value is not a ``str``, so it returns unchanged.
+    Captions are the only list-of-display-strings we have, and an over-long one is
+    not harmless: ``scene.caption`` fits it to the frame width by shrinking, so a
+    200-character line becomes unreadably small and fails Gate 3's legibility check
+    instead of simply being trimmed.
+    """
+    clamp = clamp_text(limit)
+
+    def _clamp_each(value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        return [clamp(v) for v in value]
+
+    return _clamp_each
+
+
 def coerce_caption_list(value: Any) -> Any:
     """Captions arrive as a list of strings, or near enough.
 

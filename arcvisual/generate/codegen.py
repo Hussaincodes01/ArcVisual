@@ -39,6 +39,7 @@ from arcvisual.providers.base import (
 )
 from arcvisual.providers.registry import get_provider
 from arcvisual.storyboard import (
+    Archetype,
     Beat,
     GateReport,
     Scene,
@@ -145,7 +146,6 @@ def generate_scene(
     it. Repair is parameter adjustment, never a code rewrite — which is the whole
     reason templates are worth their cost.
     """
-    template = registry.get(opportunity.archetype)
     section = sb.section(opportunity.span.section_id)
     source_text = opportunity.span.resolve(section)
 
@@ -155,6 +155,43 @@ def generate_scene(
         provider = AnthropicProvider(client=client)
     if provider is None:
         provider = get_provider()
+
+    # A custom scene has no template to fill: the model writes the Manim itself.
+    # Dispatched here rather than inside the template registry because the two paths
+    # differ in what the model produces, not in how the result is handled — the
+    # GenerateResult that comes back goes through the same gates, the same repair
+    # ladder and the same cache.
+    if opportunity.archetype is Archetype.CUSTOM_SCENE:
+        if provider is None:
+            # Nothing to fall back on: there is no heuristic that writes an
+            # animation. Say so plainly rather than emitting a stub that renders an
+            # empty frame and reports success.
+            scene = Scene(
+                spec=_spec(opportunity, {}, [], False),
+                state=SceneState.GENERATING,
+                attempts=attempt,
+                gate_report=GateReport(),
+            )
+            return GenerateResult(
+                scene=scene,
+                source="",
+                params_obj=None,
+                cost_usd=0.0,
+                cost_attributed=True,
+                provider="heuristic",
+                notes=["custom_scene needs a model provider; none is configured"],
+            )
+        from arcvisual.generate.custom_codegen import generate_custom
+
+        return generate_custom(
+            sb,
+            opportunity,
+            provider=provider,
+            findings=findings,
+            attempt=attempt,
+        )
+
+    template = registry.get(opportunity.archetype)
 
     if provider is None:
         raw_params, beats, scrubbable = heuristic_params(sb, opportunity)
