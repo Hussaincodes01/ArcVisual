@@ -61,9 +61,11 @@ class Models:
     """Anthropic model choices, per the plan's cheap-to-classify / strong-to-codegen
     split."""
 
-    classify: str = "claude-sonnet-5"  # section analysis, triage
-    codegen: str = "claude-opus-5"  # parameter filling, repair
-    vision: str = "claude-sonnet-5"  # Gate 4
+    # Current generation: Opus 5.5 is both newer and cheaper than Opus 5
+    # ($4/$20 vs $5/$25 per MTok), and Sonnet 5.5 matches Sonnet 5's price.
+    classify: str = "claude-sonnet-5-5"  # section analysis, triage
+    codegen: str = "claude-opus-5-5"  # parameter filling, repair
+    vision: str = "claude-sonnet-5-5"  # Gate 4
     max_tokens: int = 8192
     #: Structured-output attempts for ANALYZE, on providers without constrained
     #: decoding. Higher than codegen's because the cost of giving up is different:
@@ -148,8 +150,12 @@ class Groq:
     #: remaining in the window. It also rejects json_schema outright. So both tasks
     #: use the constrained model, and the paper body is trimmed to fit —
     #: see `prompt_char_budget` on the capabilities.
-    classify: str = "qwen/qwen3.6-27b"
-    codegen: str = "qwen/qwen3.6-27b"
+    #: Comma-separated, in preference order. Groq retires models without notice —
+    #: `qwen/qwen3.6-27b` started answering 404 "model_not_found" and took every job
+    #: down with it, because a single hardcoded id had nothing to fall back to. The
+    #: provider now walks this list and skips ids the server has declared gone.
+    classify: str = "qwen/qwen3.8-27b,openai/gpt-oss-120b"
+    codegen: str = "qwen/qwen3.8-27b,openai/gpt-oss-120b"
     vision: str = ""
     temperature: float = 0.2
     timeout_s: float = 180.0
@@ -229,12 +235,18 @@ class Groq:
     #: decoding does not truncate politely — it fails the whole call.
     max_tokens_codegen: int = 4500
 
-    def model_for(self, task: str) -> str:
-        return {
+    def models_for(self, task: str) -> list[str]:
+        """Every configured model for `task`, in preference order."""
+        raw = {
             "classify": self.classify,
             "codegen": self.codegen,
             "vision": self.vision,
         }.get(task, self.classify)
+        return [m.strip() for m in raw.split(",") if m.strip()]
+
+    def model_for(self, task: str) -> str:
+        models = self.models_for(task)
+        return models[0] if models else ""
 
     def sends_reasoning_effort(self, model: str = "") -> bool:
         """Whether to send the parameter at all, for this model.
@@ -246,6 +258,20 @@ class Groq:
         if not self.reasoning_effort:
             return False
         return any(tag in model for tag in ("qwen", "gpt-oss"))
+
+    def effort_for(self, model: str) -> str:
+        """The reasoning effort value this *model* accepts, or "" to omit it.
+
+        The two families take disjoint vocabularies, verified on a live key:
+        qwen accepts "none" / "default" (and "low"), while gpt-oss accepts only
+        "low" / "medium" / "high" and rejects "none" with 400. Sending the qwen
+        setting to a gpt-oss fallback would fail every call it was meant to rescue.
+        """
+        if not self.sends_reasoning_effort(model):
+            return ""
+        if "gpt-oss" in model and self.reasoning_effort in ("none", "default"):
+            return "low"
+        return self.reasoning_effort
 
     def enforces_schema(self, model: str) -> bool:
         """Whether `model` actually constrains decoding to the schema."""
@@ -359,6 +385,20 @@ class Settings:
     #: behind a single load balancer, 2 behind a CDN plus a load balancer.
     trusted_proxy_hops: int = 0
     strict_ownership: bool = True  # assert_monotonic between stages
+    #: "manim" renders each scene to video (Modal, or the local renderer).
+    #: "client" ships the validated parameters and lets the reader animate them in
+    #: the browser — no Manim, no ffmpeg, no object storage, so the whole product
+    #: runs on serverless functions. Only archetypes with a browser renderer are
+    #: offered to the analyzer in this mode.
+    render_mode: str = "manim"
+    #: Wall-clock seconds one `/advance` call may spend before handing back. Kept
+    #: well under the platform's function limit (300s on Vercel Hobby): a scene
+    #: started near the end must still finish inside the same invocation.
+    step_budget_s: int = 200
+
+    @property
+    def client_render(self) -> bool:
+        return self.render_mode.strip().lower() == "client"
 
     budgets: Budgets = field(default_factory=Budgets)
     ingest: Ingest = field(default_factory=Ingest)
@@ -472,8 +512,14 @@ def settings() -> Settings:
         rate_limit_per_hour=int(env("RATE_LIMIT_PER_HOUR", "3")),
         trusted_proxy_hops=int(env("ARCVISUAL_TRUSTED_PROXY_HOPS", "0")),
         strict_ownership=env("STRICT_OWNERSHIP", "1") != "0",
+        render_mode=env("ARCVISUAL_RENDER_MODE", "manim"),
+        step_budget_s=int(env("ARCVISUAL_STEP_BUDGET_S", "200")),
         budgets=Budgets(
             scene_concurrency=int(env("ARCVISUAL_SCENE_CONCURRENCY", "4")),
+        ),
+        models=Models(
+            classify=env("ANTHROPIC_MODEL_CLASSIFY", Models.classify),
+            codegen=env("ANTHROPIC_MODEL_CODEGEN", Models.codegen),
         ),
         groq=Groq(
             api_key=env("GROQ_API_KEY", ""),

@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, func, or_, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -30,10 +30,42 @@ from arcvisual.storyboard import JobState, SceneState
 _engine: Engine | None = None
 
 
+def normalize_dsn(dsn: str) -> str:
+    """Pin the driver SQLAlchemy uses for a Postgres URL.
+
+    Hosted Postgres (Neon, Supabase, Vercel's marketplace) hands out
+    ``postgres://`` or ``postgresql://`` URLs. SQLAlchemy reads the bare form as a
+    request for psycopg2, which is not installed — psycopg 3 is — so an unmodified
+    connection string fails at the first query with an import error.
+    """
+    for prefix in ("postgres://", "postgresql://"):
+        if dsn.startswith(prefix):
+            return "postgresql+psycopg://" + dsn[len(prefix) :]
+    return dsn
+
+
+def _engine_kwargs(dsn: str) -> dict:
+    if not dsn.startswith("postgresql"):
+        return {}
+    return {
+        "pool_pre_ping": True,
+        # Serverless instances are frozen between requests; a connection idle past
+        # the pooler's timeout is dead on thaw. Recycle well before that.
+        "pool_recycle": 280,
+        "pool_size": 3,
+        "max_overflow": 4,
+        # Neon's pooled endpoint is PgBouncer in transaction mode, where a server-
+        # side prepared statement made on one backend is missing on the next.
+        # psycopg prepares automatically after five executions; turn that off.
+        "connect_args": {"prepare_threshold": None, "connect_timeout": 10},
+    }
+
+
 def engine(url: str | None = None, *, echo: bool = False) -> Engine:
     global _engine
     if url is not None:
-        return create_engine(url, echo=echo, future=True)
+        url = normalize_dsn(url)
+        return create_engine(url, echo=echo, future=True, **_engine_kwargs(url))
     if _engine is None:
         dsn = settings().database_url
         if not dsn:
@@ -41,7 +73,8 @@ def engine(url: str | None = None, *, echo: bool = False) -> Engine:
                 "DATABASE_URL is not set. The pipeline runs without a database; "
                 "only persistence needs one."
             )
-        _engine = create_engine(dsn, echo=echo, future=True, pool_pre_ping=True)
+        dsn = normalize_dsn(dsn)
+        _engine = create_engine(dsn, echo=echo, future=True, **_engine_kwargs(dsn))
     return _engine
 
 
@@ -68,8 +101,12 @@ def hash_submitter(ip: str) -> str:
 
 
 def upsert_paper(session: Session, result: JobResult) -> Paper:
-    sb = result.storyboard
-    assert sb is not None
+    assert result.storyboard is not None
+    return upsert_paper_from_storyboard(session, result.storyboard)
+
+
+def upsert_paper_from_storyboard(session: Session, sb) -> Paper:
+    """The canonical paper row for an ingested storyboard, created or refreshed."""
     meta = sb.paper
     stmt = select(Paper)
     if meta.arxiv_id:
@@ -254,14 +291,19 @@ def _touch_artifact(session: Session, scene, artifact) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def storyboard_for_slug(session: Session, slug: str) -> dict | None:
-    """The reader's single read, served through the API."""
-    job = session.scalars(
+def job_for_slug(session: Session, slug: str) -> Job | None:
+    """The newest job for this article at the current pipeline version."""
+    return session.scalars(
         select(Job)
         .join(Paper, Paper.id == Job.paper_id)
         .where(Paper.slug == slug, Job.pipeline_version == PIPELINE_VERSION)
         .order_by(Job.created_at.desc())
     ).first()
+
+
+def storyboard_for_slug(session: Session, slug: str) -> dict | None:
+    """The reader's single read, served through the API."""
+    job = job_for_slug(session, slug)
     return job.storyboard if job else None
 
 
@@ -445,3 +487,138 @@ def scene_states(session: Session, job_id) -> list[dict]:
         }
         for r in rows
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Stepped execution (serverless)
+# --------------------------------------------------------------------------- #
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def acquire_lease(session: Session, job_id, ttl_s: float) -> str | None:
+    """Claim a job for one bounded step. Returns a token, or None if it is held.
+
+    A single conditional UPDATE, so two invocations racing for the same job cannot
+    both win: the database decides, not a read-then-write in Python.
+    """
+    import uuid as _uuid
+    from datetime import timedelta
+
+    from arcvisual.db.models import Job
+
+    token = _uuid.uuid4().hex
+    now = _utcnow()
+    result = session.execute(
+        update(Job)
+        .where(
+            Job.id == job_id,
+            or_(Job.lease_until.is_(None), Job.lease_until < now),
+        )
+        .values(lease_until=now + timedelta(seconds=ttl_s), lease_owner=token)
+        .execution_options(synchronize_session=False)
+    )
+    session.commit()
+    return token if result.rowcount == 1 else None
+
+
+def release_lease(session: Session, job_id, token: str) -> None:
+    """Give the job back early. Only the holder's token can release it."""
+    from arcvisual.db.models import Job
+
+    session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.lease_owner == token)
+        .values(lease_until=None, lease_owner=None)
+        .execution_options(synchronize_session=False)
+    )
+    session.commit()
+
+
+def lease_active(job) -> bool:
+    until = getattr(job, "lease_until", None)
+    if until is None:
+        return False
+    if until.tzinfo is None:  # SQLite hands back naive datetimes
+        until = until.replace(tzinfo=UTC)
+    return until > _utcnow()
+
+
+def live_job_for_arxiv(session: Session, arxiv_id: str, *, max_age_hours: int = 24):
+    """The newest unfinished job for this paper, if one is still worth resuming.
+
+    Two readers submitting the same new paper should share one run, not pay for two.
+    The age cap stops a job abandoned days ago (say, before a deploy changed the
+    pipeline) from being handed out forever.
+    """
+    from datetime import timedelta
+
+    from arcvisual.db.models import Job
+
+    cutoff = _utcnow() - timedelta(hours=max_age_hours)
+    return session.scalars(
+        select(Job)
+        .where(
+            Job.arxiv_id == arxiv_id,
+            Job.pipeline_version == PIPELINE_VERSION,
+            Job.state.notin_(["complete", "failed"]),
+            Job.created_at >= cutoff,
+        )
+        .order_by(Job.created_at.desc())
+    ).first()
+
+
+def stale_live_jobs(session: Session, *, limit: int = 3, max_age_hours: int = 24) -> list:
+    """Unfinished jobs nobody is currently advancing — the cron sweep's work list."""
+    from datetime import timedelta
+
+    from arcvisual.db.models import Job
+
+    now = _utcnow()
+    cutoff = now - timedelta(hours=max_age_hours)
+    return list(
+        session.scalars(
+            select(Job)
+            .where(
+                Job.pipeline_version == PIPELINE_VERSION,
+                Job.state.notin_(["complete", "failed"]),
+                Job.created_at >= cutoff,
+                or_(Job.lease_until.is_(None), Job.lease_until < now),
+            )
+            .order_by(Job.created_at.asc())
+            .limit(limit)
+        ).all()
+    )
+
+
+def recent_papers(session: Session, *, limit: int = 12) -> list[dict]:
+    """Finished articles, newest first, for the gallery. Small fields only."""
+    rows = session.execute(
+        select(Job, Paper)
+        .join(Paper, Paper.id == Job.paper_id)
+        .where(Job.pipeline_version == PIPELINE_VERSION, Job.state == "complete")
+        .order_by(Job.completed_at.desc().nullslast(), Job.created_at.desc())
+        .limit(limit)
+    ).all()
+    out = []
+    for job, paper in rows:
+        sb = job.storyboard or {}
+        scenes = [s for s in sb.get("scenes", []) if s.get("state") == "passed"]
+        meta = sb.get("paper") or {}
+        out.append(
+            {
+                "slug": paper.slug,
+                "title": paper.title,
+                "arxiv_id": paper.arxiv_id,
+                "authors": list(paper.authors or [])[:4],
+                "categories": list(meta.get("categories") or [])[:3],
+                "abstract": (meta.get("abstract") or "")[:280],
+                "visuals": len(scenes),
+                "archetypes": sorted({s["spec"]["archetype"] for s in scenes}),
+                "sections": len(sb.get("sections", [])),
+                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            }
+        )
+    return out

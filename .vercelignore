@@ -1,0 +1,30 @@
+# What the API deployment uploads. Secrets first: the local .env holds real keys,
+# and production secrets live in the project's environment variables, never here.
+.env
+.env.*
+!.env.example
+
+# The reader is its own Vercel project (root directory: reader/).
+reader/
+
+# Local state, caches and generated output.
+.git/
+.venv/
+venv/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+eval-out/
+arcvisual-media/
+media/
+*.db
+*.sqlite3
+*.pdf
+*.mp4
+*.webm
+
+# Not needed at runtime.
+tests/
+eval/
+.github/

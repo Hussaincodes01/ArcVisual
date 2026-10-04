@@ -31,7 +31,7 @@ import hashlib
 import logging
 import threading
 
-from arcvisual.config import settings
+from arcvisual.config import Groq, settings
 from arcvisual.providers.base import (
     Capabilities,
     ProviderNotConfigured,
@@ -52,6 +52,11 @@ DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 #: the whole 8,000 TPM and collectively ask for 32,000.
 _METERS: dict[tuple[str, int], TokenBudget] = {}
 _METERS_LOCK = threading.Lock()
+
+#: Model ids the server has answered with "model_not_found" in this process. Shared
+#: across instances for the same reason the meters are: every scene lane builds its
+#: own provider, and each one rediscovering a retired id costs a request.
+_UNAVAILABLE: set[str] = set()
 
 
 def _meter_for(api_key: str, tpm: int) -> TokenBudget | None:
@@ -98,7 +103,7 @@ class GroqProvider(OpenAICompatProvider):
         return "max_completion_tokens"
 
     def _reasoning_effort(self, model: str = "") -> str:
-        return self._cfg.reasoning_effort if self._cfg.sends_reasoning_effort(model) else ""
+        return self._cfg.effort_for(model)
 
     def _budget(self, requested: int, model: str = "", task: str = "") -> int:
         """Clamp to this model's per-request ceiling for this task.
@@ -125,12 +130,30 @@ class GroqProvider(OpenAICompatProvider):
             return self._cfg.json_schema
         return self._cfg.enforces_schema(model)
 
+    def candidates_for(self, task: Task) -> list[str]:
+        configured = self._cfg.models_for(task.value)
+        # The built-in chain goes after whatever is configured. An environment
+        # pinned to one id (as a real deployment was, to a model since retired)
+        # then still reaches a live model instead of failing every job.
+        builtin = Groq().models_for(task.value)
+        chain = configured + [m for m in builtin if m not in configured]
+        live = [m for m in chain if m not in _UNAVAILABLE]
+        # Every id rejected: try them all again rather than refusing to call at
+        # all. A transient 404 during a provider incident should not poison the
+        # process for good.
+        return live or chain
+
+    def mark_unavailable(self, model: str) -> None:
+        with _METERS_LOCK:
+            _UNAVAILABLE.add(model)
+
     def model_for(self, task: Task) -> str:
-        return self._cfg.model_for(task.value)
+        candidates = self.candidates_for(task)
+        return candidates[0] if candidates else ""
 
     def capabilities(self) -> Capabilities:
         attributed = self._cfg.rate_in is not None and self._cfg.rate_out is not None
-        analyze_model = self._cfg.classify
+        analyze_model = self.model_for(Task.CLASSIFY)
         constrained = self.supports_json_schema(analyze_model)
         return Capabilities(
             name=self.name,
@@ -146,7 +169,8 @@ class GroqProvider(OpenAICompatProvider):
             analysis_item_budget=self._cfg.analysis_item_budget,
             note=(
                 (
-                    f"{analyze_model} for analyze / {self._cfg.codegen} for codegen; "
+                    f"{analyze_model} for analyze / "
+                    f"{self.model_for(Task.CODEGEN)} for codegen; "
                 )
                 + (
                     "analyze uses constrained decoding (strict json_schema), "

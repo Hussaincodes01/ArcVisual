@@ -33,9 +33,17 @@ from arcvisual.ingest.errors import IngestRejection
 log = logging.getLogger(__name__)
 
 
-def build_api(orchestrate: Any | None = None):
-    """Construct the FastAPI app. ``orchestrate`` is the Modal function to spawn."""
-    from fastapi import Depends, FastAPI, Header, HTTPException, Request
+def build_api(orchestrate: Any | None = None, *, stepped: bool | None = None):
+    """Construct the FastAPI app.
+
+    ``orchestrate`` is the Modal function to spawn. ``stepped`` selects the
+    serverless model instead: no worker is spawned, and the job is driven forward
+    by ``POST /api/jobs/{id}/advance`` calls (see :mod:`arcvisual.render.stepper`).
+    It defaults to ``ARCVISUAL_EXECUTION=stepped``.
+    """
+    import os
+
+    from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel, Field
 
@@ -43,6 +51,8 @@ def build_api(orchestrate: Any | None = None):
     from arcvisual.render import storage
 
     cfg = settings()
+    if stepped is None:
+        stepped = os.environ.get("ARCVISUAL_EXECUTION", "").strip().lower() == "stepped"
     api = FastAPI(
         title="ArcVisual",
         version=PIPELINE_VERSION,
@@ -52,6 +62,7 @@ def build_api(orchestrate: Any | None = None):
         CORSMiddleware,
         # The reader is the only browser client; keep the surface narrow.
         allow_origins=_allowed_origins(),
+        allow_origin_regex=os.environ.get("ARCVISUAL_ALLOWED_ORIGIN_REGEX") or None,
         allow_methods=["GET", "POST"],
         allow_headers=["content-type"],
     )
@@ -102,20 +113,9 @@ def build_api(orchestrate: Any | None = None):
             # Fail loud at second 5, not minute 12.
             raise HTTPException(status_code=422, detail=exc.as_failure()) from exc
 
-        # Rate limit before any spend. Without this the render bill is a
-        # stranger's decision.
-        if repo.recent_submissions(session, key) >= cfg.rate_limit_per_hour:
-            raise HTTPException(
-                status_code=429,
-                detail={
-                    "code": "rate_limited",
-                    "user_facing": (
-                        f"You have submitted {cfg.rate_limit_per_hour} papers in the "
-                        "last hour, which is our limit for now. Try again later."
-                    ),
-                },
-            )
-
+        # Free answers first. A finished article, or a run already in progress for
+        # this paper, costs nothing to hand out — so neither counts against the rate
+        # limit, which exists to bound spend, not reading.
         cached = _cached_job(session, arxiv_id)
         if cached is not None:
             # Idempotency: same paper, same pipeline version, same article.
@@ -124,6 +124,45 @@ def build_api(orchestrate: Any | None = None):
                 "slug": _slug_of(session, cached),
                 "state": cached.state,
                 "cached": True,
+            }
+        live = repo.live_job_for_arxiv(session, arxiv_id)
+        if live is not None:
+            # Someone is already building this one. Share the run instead of
+            # paying for a second; the waiting room resumes driving it.
+            return {
+                "job_id": str(live.id),
+                "slug": (live.stage_progress or {}).get("slug"),
+                "arxiv_id": arxiv_id,
+                "state": live.state,
+                "cached": False,
+                "resumed": True,
+            }
+
+        # Rate limit before any spend. Without this the render bill is a
+        # stranger's decision.
+        if repo.recent_submissions(session, key) >= cfg.rate_limit_per_hour:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "rate_limited",
+                    "user_facing": (
+                        f"You have submitted {cfg.rate_limit_per_hour} new papers in "
+                        "the last hour, which is our limit for now. Papers someone "
+                        "has already explained still open instantly."
+                    ),
+                },
+            )
+
+        if stepped:
+            job = repo.create_queued_job(
+                session, url=body.url, arxiv_id=arxiv_id, submitted_by=key
+            )
+            return {
+                "job_id": str(job.id),
+                "arxiv_id": arxiv_id,
+                "state": "queued",
+                "cached": False,
+                "stepped": True,
             }
 
         if orchestrate is None:
@@ -163,9 +202,7 @@ def build_api(orchestrate: Any | None = None):
 
     # -- status ------------------------------------------------------------- #
 
-    @api.get("/api/jobs/{job_id}")
-    def job_status(job_id: str, session=Depends(db)):
-        """The polling endpoint. One row, one JSONB column, cheap by design."""
+    def load_job(session, job_id: str):
         from arcvisual.db.models import Job
 
         # A malformed id is a 404, not a 500. `session.get` passes the string into the
@@ -179,6 +216,9 @@ def build_api(orchestrate: Any | None = None):
         job = session.get(Job, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail={"code": "unknown_job"})
+        return job
+
+    def job_payload(session, job) -> dict:
         return {
             "job_id": str(job.id),
             "state": job.state,
@@ -187,20 +227,91 @@ def build_api(orchestrate: Any | None = None):
             "scenes": repo.scene_states(session, job.id),
             "failure": job.failure,
             "cost_usd": float(job.cost_usd or 0),
+            # Tells a stepped client whether to drive the job or just watch it.
+            "stepped": stepped,
+            "working": repo.lease_active(job),
         }
+
+    @api.get("/api/jobs/{job_id}")
+    def job_status(job_id: str, session=Depends(db)):
+        """The polling endpoint. One row, one JSONB column, cheap by design."""
+        return job_payload(session, load_job(session, job_id))
+
+    @api.post("/api/jobs/{job_id}/advance")
+    def advance_job(job_id: str, session=Depends(db)):
+        """Drive a job forward for one bounded step (serverless execution).
+
+        Safe to call from any number of clients at once: the stepper leases the job,
+        so exactly one call does work and the rest come straight back with
+        ``busy: true``. A finished job is a no-op.
+        """
+        from arcvisual.render import stepper
+
+        job = load_job(session, job_id)
+        if not stepped:
+            raise HTTPException(status_code=409, detail={"code": "not_stepped"})
+        busy = False
+        if job.state not in stepper.TERMINAL:
+            report = stepper.advance(str(job.id), session_factory=repo.session_factory())
+            busy = report.busy
+            session.expire_all()
+            job = load_job(session, job_id)
+        return {**job_payload(session, job), "busy": busy}
+
+    @api.get("/api/cron/sweep")
+    def sweep(authorization: str | None = Header(default=None)):
+        """Advance jobs nobody is watching. Called by the platform scheduler.
+
+        A stepped job only moves while a reader drives it, so one whose tab closed
+        mid-run would otherwise wait for the next visitor. Requires the scheduler's
+        bearer secret; without one configured the route is closed.
+        """
+        from arcvisual.render import stepper
+
+        secret = os.environ.get("CRON_SECRET", "")
+        if not stepped or not secret or authorization != f"Bearer {secret}":
+            raise HTTPException(status_code=403, detail={"code": "forbidden"})
+        # One job per call: a step can use most of the function's time limit, so a
+        # second would be cut off mid-scene.
+        with repo.session_factory()() as session:
+            ids = [str(j.id) for j in repo.stale_live_jobs(session, limit=1)]
+        advanced = []
+        for jid in ids:
+            report = stepper.advance(jid, session_factory=repo.session_factory())
+            advanced.append({"job_id": jid, "state": report.state, "busy": report.busy})
+        return {"advanced": advanced}
 
     # -- read --------------------------------------------------------------- #
 
+    @api.get("/api/papers")
+    def papers(response: Response, limit: int = 12, session=Depends(db)):
+        """Recently finished articles, for the gallery."""
+        limit = max(1, min(limit, 48))
+        # Edge-cached briefly: the gallery is read on every landing visit and changes
+        # only when an article finishes, so this keeps it off the database.
+        response.headers["Cache-Control"] = "public, s-maxage=60, stale-while-revalidate=600"
+        return {"papers": repo.recent_papers(session, limit=limit)}
+
     @api.get("/api/papers/{slug}")
-    def paper(slug: str, session=Depends(db)):
+    def paper(slug: str, response: Response, session=Depends(db)):
         """The reader's single read: the whole Storyboard for one article."""
-        sb = repo.storyboard_for_slug(session, slug)
-        if sb is None:
+        job = repo.job_for_slug(session, slug)
+        if job is None or job.storyboard is None:
             raise HTTPException(status_code=404, detail={"code": "unknown_paper"})
+        if job.state == "complete":
+            # Immutable at a given pipeline version; let the edge absorb readers.
+            response.headers["Cache-Control"] = (
+                "public, s-maxage=300, stale-while-revalidate=86400"
+            )
+        else:
+            response.headers["Cache-Control"] = "no-store"
         return {
             "pipeline_version": PIPELINE_VERSION,
-            "storyboard": sb,
+            "storyboard": job.storyboard,
             "media_base": storage.media_base_url(),
+            "job_id": str(job.id),
+            "state": job.state,
+            "render_mode": "client" if cfg.client_render else "video",
         }
 
     @api.get("/api/papers/{slug}/scenes/{scene_key}")
@@ -273,6 +384,8 @@ def build_api(orchestrate: Any | None = None):
             checks["provider_error"] = str(exc)
         checks["provider"] = provider_registry.describe(provider)
         checks["providers_available"] = provider_registry.available()
+        checks["render_mode"] = "client" if cfg.client_render else "manim"
+        checks["execution"] = "stepped" if stepped else "spawned"
         checks["r2"] = "configured" if cfg.r2_account_id else "missing"
         checks["cdn"] = "configured" if cfg.r2_public_base else "missing"
         ok = checks.get("db") == "ok"
@@ -403,7 +516,15 @@ def _media_present(session, job) -> bool:
         if not content_hash:
             continue
         artifact = session.get(ArtifactRow, content_hash)
-        if artifact is None or not storage.has_scene_local(artifact.mp4_key):
+        if artifact is None:
+            return False
+        if artifact.quality == "client":
+            # Animated in the browser from the stored parameters: there are no bytes
+            # to lose, so the article is servable as long as its row exists. Without
+            # this every client-rendered article failed the check and was rebuilt —
+            # at full model cost — on every single submission.
+            continue
+        if not storage.has_scene_local(artifact.mp4_key):
             return False
     return True
 

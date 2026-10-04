@@ -142,6 +142,20 @@ class ProviderNotConfigured(ProviderError):
     """Credentials or a binary are missing. Distinct from a call failing."""
 
 
+class ModelUnavailable(ProviderError):
+    """The server says this model id does not exist (any more) for this key.
+
+    Not retryable against the same model — it fails identically forever — but it is
+    the one failure where switching to the *next configured model* is the right
+    response. Hosted providers retire ids without notice, and a deployment that
+    cannot route around that is one deprecation away from being down.
+    """
+
+    def __init__(self, model: str, detail: str = "") -> None:
+        super().__init__(f"model {model!r} is unavailable: {detail}".rstrip(": "))
+        self.model = model
+
+
 class RetryableProviderError(ProviderError):
     """A failure that varies run to run, so another attempt may well succeed.
 

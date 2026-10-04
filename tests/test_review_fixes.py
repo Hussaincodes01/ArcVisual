@@ -150,7 +150,8 @@ def test_cache_write_multiplier_matches_the_requested_ttl(reset_settings) -> Non
     class _Resp:
         usage = _Usage()
 
-    usage = provider._usage(_Resp(), "claude-sonnet-5")
+    # Sonnet 4.6 bills $3/MTok input, so 1M cache-written tokens at 1h cost $6.
+    usage = provider._usage(_Resp(), "claude-sonnet-4-6")
     assert usage.cost_usd == pytest.approx(3.00 * 2.0)
 
 

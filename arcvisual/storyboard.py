@@ -134,6 +134,8 @@ class PaperMeta(BaseModel):
     source_sha256: str
     published: str | None = None
     origin_url: str
+    #: arXiv subject classes, primary first (e.g. ``cs.LG``). Display only.
+    categories: list[str] = []
 
 
 class Equation(BaseModel):
@@ -292,13 +294,20 @@ class GateReport(BaseModel):
 
 
 class Artifact(BaseModel):
+    """What a passed scene ships.
+
+    ``quality == "client"`` means there is no video: the reader animates
+    ``spec.params`` itself. The media keys are still content-addressed so a later
+    render worker could fill them in, but nothing is fetched for a client artifact.
+    """
+
     content_hash: str
     mp4_key: str
     webm_key: str | None = None
     poster_key: str
     framestrip_key: str
     duration_s: float
-    quality: Literal["draft", "final"]
+    quality: Literal["draft", "final", "client"]
     bytes: int = 0
 
 

@@ -148,6 +148,12 @@ class Job(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: The stepper's mutual exclusion. On serverless a job advances through many
+    #: short invocations, any two of which may arrive at once (two open tabs, a
+    #: retry, the cron sweep). Whoever sets this into the future owns the job until
+    #: it passes; an invocation killed mid-step simply lets it expire.
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(32))
 
     paper: Mapped[Paper] = relationship(back_populates="jobs")
     scenes: Mapped[list[SceneRow]] = relationship(

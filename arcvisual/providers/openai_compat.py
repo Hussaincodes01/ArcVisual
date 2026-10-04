@@ -25,6 +25,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 from arcvisual.providers.base import (
+    ModelUnavailable,
     ProviderError,
     RetryableProviderError,
     StructuredResult,
@@ -50,6 +51,17 @@ _DAILY_WAIT_CEILING_S = 45.0
 
 #: HTTP statuses worth another attempt. 429 and 5xx are load, not a bad request.
 _RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+#: (model, schema name, schema digest) combinations a server refused for strict
+#: decoding in this process. Retrying the identical schema fails identically.
+_SCHEMA_REJECTED: set[tuple[str, str, str]] = set()
+
+
+def _schema_digest(output_model: type[BaseModel]) -> str:
+    import hashlib
+
+    raw = json.dumps(output_model.model_json_schema(), sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 class OpenAICompatProvider:
@@ -150,13 +162,65 @@ class OpenAICompatProvider:
         max_tokens: int = 8192,
         max_attempts: int = 2,
     ) -> StructuredResult:
-        model = self.model_for(task)
+        """One typed object, walking the configured models if one has been retired.
+
+        Only :class:`ModelUnavailable` moves on to the next model. Every other failure
+        is about the request or the moment, not the model id, and switching models
+        would only hide it.
+        """
+        candidates = self.candidates_for(task) or [self.model_for(task)]
+        last: ModelUnavailable | None = None
+        for model in candidates:
+            try:
+                return self._structured_with(
+                    model, system, user, output_model, task, max_tokens, max_attempts
+                )
+            except ModelUnavailable as exc:
+                log.warning("%s: %s; trying the next configured model", self.name, exc)
+                self.mark_unavailable(model)
+                last = exc
+        raise last if last else ProviderError(f"{self.name} has no model for {task.value}")
+
+    def candidates_for(self, task: Task) -> list[str]:
+        """Models to try for `task`, best first. Single-model providers return one."""
+        return [self.model_for(task)]
+
+    def mark_unavailable(self, model: str) -> None:
+        """Remember that the server rejected `model` as unknown. No-op by default."""
+
+    def _structured_with(
+        self,
+        model: str,
+        system: list[TextBlock],
+        user: str,
+        output_model: type[T],
+        task: Task,
+        max_tokens: int,
+        max_attempts: int,
+    ) -> StructuredResult:
         budget = self._budget(max_tokens, model, task.value)
 
-        if self.supports_json_schema(model):
-            return self._constrained(
-                model, system, user, output_model, budget, max_attempts
-            )
+        schema_key = (model, output_model.__name__, _schema_digest(output_model))
+        if self.supports_json_schema(model) and schema_key not in _SCHEMA_REJECTED:
+            try:
+                return self._constrained(
+                    model, system, user, output_model, budget, max_attempts
+                )
+            except ProviderError as exc:
+                if "invalid JSON schema" not in str(exc):
+                    raise
+                # The model refuses this SHAPE of schema (each implementation of
+                # strict mode supports a different subset). That is a fact about the
+                # schema, not the request, so remember it and use the prompted path
+                # — validated client-side — rather than failing every call.
+                log.warning(
+                    "%s rejected the %s schema for strict decoding; using prompted "
+                    "JSON instead: %s",
+                    model,
+                    output_model.__name__,
+                    str(exc)[:200],
+                )
+                _SCHEMA_REJECTED.add(schema_key)
 
         def send(system_text: str, user_text: str) -> tuple[str, Usage]:
             return self._chat(model, system_text, user_text, budget)
@@ -372,6 +436,8 @@ class OpenAICompatProvider:
         if response.status_code >= 400:
             if meter is not None:
                 meter.settle(reserved, 0)
+            if _is_model_gone(response.status_code, response.text):
+                raise ModelUnavailable(model, response.text[:200])
             raise ProviderError(
                 f"{self.name} returned {response.status_code}: {response.text[:400]}"
             )
@@ -438,6 +504,15 @@ def _harden_schema(schema: dict) -> None:
         # budget failing to produce a valid object.
         for sub in props.values():
             _harden_schema(sub)
+    # Tuples arrive as `prefixItems`, which strict implementations support
+    # unevenly. A homogeneous tuple (a point, a range) says the same thing as
+    # `items` plus its min/max length, which every implementation accepts; the
+    # client-side model still validates the exact arity.
+    prefix = schema.get("prefixItems")
+    if isinstance(prefix, list) and prefix and all(p == prefix[0] for p in prefix):
+        schema["items"] = schema.pop("prefixItems")[0]
+        schema.setdefault("minItems", len(prefix))
+        schema.setdefault("maxItems", len(prefix))
     for key in ("items", "prefixItems"):
         node = schema.get(key)
         if isinstance(node, dict):
@@ -448,6 +523,18 @@ def _harden_schema(schema: dict) -> None:
     for key in ("anyOf", "oneOf", "allOf"):
         for sub in schema.get(key) or []:
             _harden_schema(sub)
+
+
+def _is_model_gone(status: int, text: str) -> bool:
+    """Whether an error body says the model id itself is the problem.
+
+    Groq answers a retired id with 404 ``model_not_found`` and a deprecated one with
+    400 ``model_decommissioned``. Matching the codes rather than the prose keeps this
+    from firing on an ordinary 404 from a mistyped base URL.
+    """
+    if status not in (400, 404):
+        return False
+    return "model_not_found" in text or "model_decommissioned" in text
 
 
 def first_message(body: dict[str, Any]) -> str:

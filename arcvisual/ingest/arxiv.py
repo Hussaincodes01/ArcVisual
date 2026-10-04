@@ -38,7 +38,7 @@ from arcvisual.ingest.latex import (
 )
 from arcvisual.storyboard import PaperMeta, Storyboard
 
-_ARXIV_API = "http://export.arxiv.org/api/query"
+_ARXIV_API = "https://export.arxiv.org/api/query"
 _EPRINT = "https://arxiv.org/e-print/{arxiv_id}"
 _ABS = "https://arxiv.org/abs/{arxiv_id}"
 _ATOM = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
@@ -340,6 +340,7 @@ def build_storyboard(meta: ArxivMetadata, source_blob: bytes) -> Storyboard:
             source_sha256=hashlib.sha256(source_blob).hexdigest(),
             published=meta.published,
             origin_url=_ABS.format(arxiv_id=meta.arxiv_id),
+            categories=[c for c in meta.categories if c][:6],
         ),
         sections=parsed.sections,
         equations=parsed.equations,

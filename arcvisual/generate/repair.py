@@ -262,8 +262,14 @@ def _run_gates(
     run_gate2: bool,
 ) -> tuple[GateReport, int | None, int, bool, object | None]:
     report = GateReport()
+    # In client render mode the generated module is never executed — the browser
+    # animates the parameters — so linting it would spend a subprocess per scene on
+    # code that cannot run. Parameter validation, the part that still matters, stays.
     g1, _ = g1_static.run(
-        gen.source, gen.scene.spec.archetype, gen.params_obj.model_dump(mode="json")
+        gen.source,
+        gen.scene.spec.archetype,
+        gen.params_obj.model_dump(mode="json"),
+        run_ruff=not settings().client_render,
     )
     report.gate1 = g1
     if not g1.passed:
@@ -319,6 +325,10 @@ def _cached_artifact(gen: GenerateResult) -> Artifact | None:
     evidence — an earlier bug recorded artifacts with zero bytes, and trusting the
     row would have served empty players from the cache forever.
     """
+    if settings().client_render:
+        # Nothing is rendered, so there is nothing to reuse — and a lookup here would
+        # be a database round trip per scene for a guaranteed miss.
+        return None
     try:
         from arcvisual.db import repo
         from arcvisual.render import storage
@@ -367,6 +377,18 @@ def _artifact_for(
 
     keys = r2_keys(ch)
     payload = (report.gate2.payload if report.gate2 else {}) or {}
+
+    if settings().client_render and getattr(outcome, "video_path", None) is None:
+        # The reader animates the validated parameters itself. Say so explicitly:
+        # a draft artifact with zero bytes would make the reader request a video
+        # that was never produced and show a broken player.
+        return Artifact(
+            content_hash=ch,
+            duration_s=float(gen.scene.spec.duration_s),
+            quality="client",
+            bytes=0,
+            **keys,
+        )
 
     # Put the bytes somewhere the reader can fetch them. Without this the pipeline
     # renders a video, records its content hash, and serves an empty player — which

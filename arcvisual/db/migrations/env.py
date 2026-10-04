@@ -19,8 +19,12 @@ if config.config_file_name is not None:
 # The DSN comes from the environment, never from alembic.ini, so a connection
 # string is never committed.
 dsn = os.environ.get("DATABASE_URL")
-if dsn:
-    config.set_main_option("sqlalchemy.url", dsn.replace("%", "%%"))
+if dsn and not config.get_main_option("sqlalchemy.url"):
+    from arcvisual.db.repo import normalize_dsn
+
+    # Hosted Postgres hands out bare postgresql:// URLs, which SQLAlchemy reads as
+    # psycopg2 — not installed. Pin psycopg 3, exactly as the application engine does.
+    config.set_main_option("sqlalchemy.url", normalize_dsn(dsn).replace("%", "%%"))
 
 target_metadata = Base.metadata
 
@@ -38,6 +42,17 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    # A caller that already holds a connection (and the advisory lock on it) hands
+    # it over here — see arcvisual.db.migrate.ensure_schema.
+    supplied = config.attributes.get("connection")
+    if supplied is not None:
+        context.configure(
+            connection=supplied, target_metadata=target_metadata, compare_type=True
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

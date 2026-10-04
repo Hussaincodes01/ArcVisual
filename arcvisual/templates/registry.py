@@ -118,8 +118,31 @@ def get(archetype: Archetype | str) -> Template:
         ) from exc
 
 
+#: Archetypes the reader can animate in the browser from parameters alone. A
+#: model-authored Manim scene (`custom_scene`) is Python that only a render worker
+#: can execute, so it is withheld from the analyzer when there is no such worker.
+CLIENT_RENDERABLE = frozenset(
+    {
+        Archetype.TRANSFORM_CHAIN,
+        Archetype.PLOT_REVEAL,
+        Archetype.ARCHITECTURE_FLOW,
+    }
+)
+
+
 def available_archetypes() -> list[Archetype]:
-    return sorted(_registry(), key=lambda a: a.value)
+    """What the analyzer may propose in THIS deployment.
+
+    Read per call rather than cached: the render mode is deployment configuration,
+    and promising the model an archetype nothing here can draw would cost every such
+    scene its whole repair budget before degrading.
+    """
+    from arcvisual.config import settings
+
+    found = _registry()
+    if settings().client_render:
+        found = {a: t for a, t in found.items() if a in CLIENT_RENDERABLE}
+    return sorted(found, key=lambda a: a.value)
 
 
 def all_templates() -> list[Template]:
@@ -128,10 +151,10 @@ def all_templates() -> list[Template]:
 
 def is_available(archetype: Archetype | str) -> bool:
     try:
-        get(archetype)
+        tpl = get(archetype)
     except (UnknownArchetype, ValueError):
         return False
-    return True
+    return tpl.archetype in available_archetypes()
 
 
 def validate_or_error(archetype: Archetype, raw: dict[str, Any]) -> tuple[Any, list[str]]:

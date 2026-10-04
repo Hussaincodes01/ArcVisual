@@ -28,6 +28,7 @@ from arcvisual.analyze.prompts import (
     REPAIR_TASK,
     ParamsOut,
     build_prompt,
+    params_out_for,
 )
 from arcvisual.config import settings
 from arcvisual.providers.base import (
@@ -386,7 +387,7 @@ def _call_provider(
     result = provider.structured(
         system=system_blocks,
         user=user,
-        output_model=ParamsOut,
+        output_model=params_out_for(template.params_model),
         task=Task.CODEGEN,
         max_tokens=cfg.models.max_tokens,
     )

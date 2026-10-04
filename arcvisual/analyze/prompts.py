@@ -18,6 +18,8 @@ caching is a prefix match, so the stable half must come first.
 
 from __future__ import annotations
 
+import functools
+
 import logging
 import textwrap
 from typing import Literal
@@ -535,3 +537,39 @@ class ParamsOut(BaseModel):
             "continuous transformation), not for staged reveals."
         ),
     )
+
+
+@functools.lru_cache(maxsize=32)
+def params_out_for(params_model: type[BaseModel]) -> type[ParamsOut]:
+    """``ParamsOut`` whose *wire schema* names the template's real parameters.
+
+    Two halves, deliberately different:
+
+    * **What the model is constrained to** is the template's own schema, nested
+      under ``params``. A free-form ``params: {}`` told constrained decoding nothing,
+      and strict implementations now refuse it outright — Groq's qwen3.8 answers 400
+      "additionalProperties:false must be set on every object", which degraded every
+      scene of a real run.
+    * **What the reply is parsed into** stays a plain dict. A parameter that fails
+      the template's validators must still come back as a Gate 1 finding the repair
+      ladder can act on; parsing straight into the template model would turn the same
+      mistake into a whole failed call.
+    """
+    from pydantic import create_model
+
+    typed = create_model(
+        f"ParamsOutTyped_{params_model.__module__.rsplit('.', 1)[-1]}",
+        __base__=ParamsOut,
+        params=(params_model, Field(description="Parameters for this template.")),
+    )
+    wire = typed.model_json_schema()
+
+    class _Wire(ParamsOut):
+        @classmethod
+        def model_json_schema(cls, *args, **kwargs):  # type: ignore[override]
+            import copy
+
+            return copy.deepcopy(wire)
+
+    _Wire.__name__ = _Wire.__qualname__ = "ParamsOut"
+    return _Wire
