@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Beat } from "../../lib/types";
 import { RENDERERS } from "./registry";
+import MathText from "../MathText";
 
 interface Props {
   archetype: string;
@@ -201,7 +202,7 @@ export default function LiveScene({
 
       {caption ? (
         <p className="mt-3 min-h-[3rem] text-[0.95rem] leading-snug text-ink" aria-live="off">
-          {caption}
+          <MathText text={caption} macros={macros} />
         </p>
       ) : null}
 

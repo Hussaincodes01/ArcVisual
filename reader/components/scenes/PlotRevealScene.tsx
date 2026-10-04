@@ -24,6 +24,7 @@ import {
   type SceneProps,
 } from "../../lib/scenes/core";
 import type { PlotRevealData } from "../../lib/scenes/plans";
+import { plainText } from "../../lib/tex";
 
 function ticks(lo: number, hi: number, log: boolean): number[] {
   if (log) {
@@ -37,7 +38,10 @@ function ticks(lo: number, hi: number, log: boolean): number[] {
   return out.slice(0, 12);
 }
 
-export default function PlotRevealScene({ plan, t }: SceneProps<PlotRevealData>) {
+export default function PlotRevealScene({ plan, t, macros }: SceneProps<PlotRevealData>) {
+  // SVG cannot hold KaTeX: axis titles, series names and the takeaway are shown as
+  // readable Unicode math rather than TeX source.
+  const show = (text: string) => plainText(text, macros);
   const d = plan.data;
   // Unique per scene: several charts can share a page, and SVG ids are global.
   const clipId = `plot-${useId().replace(/[^a-zA-Z0-9-]/g, "")}`;
@@ -62,7 +66,7 @@ export default function PlotRevealScene({ plan, t }: SceneProps<PlotRevealData>)
   const yt = ticks(d.yRange[0], d.yRange[1], d.logY);
 
   return (
-    <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} className="absolute inset-0 h-full w-full" role="img" aria-label={`Chart of ${d.yLabel} against ${d.xLabel}`}>
+    <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} className="absolute inset-0 h-full w-full" role="img" aria-label={`Chart of ${show(d.yLabel)} against ${show(d.xLabel)}`}>
       <defs>
         <clipPath id={clipId}>
           <rect x={left - 8} y={top - 12} width={pw + 16} height={ph + 20} />
@@ -85,7 +89,7 @@ export default function PlotRevealScene({ plan, t }: SceneProps<PlotRevealData>)
           </text>
         ))}
         <text x={(left + right) / 2} y={bottom + 70} textAnchor="middle" fontSize={25} fontWeight={500} fill={PALETTE.ink}>
-          {d.xLabel}
+          {show(d.xLabel)}
         </text>
         <text
           transform={`translate(34 ${(top + bottom) / 2}) rotate(-90)`}
@@ -94,7 +98,7 @@ export default function PlotRevealScene({ plan, t }: SceneProps<PlotRevealData>)
           fontWeight={500}
           fill={PALETTE.ink}
         >
-          {d.yLabel}
+          {show(d.yLabel)}
         </text>
       </g>
       <line x1={left} y1={bottom} x2={left + pw * a} y2={bottom} stroke={PALETTE.ink} strokeWidth={2.5} strokeLinecap="round" />
@@ -158,7 +162,7 @@ export default function PlotRevealScene({ plan, t }: SceneProps<PlotRevealData>)
         const [px, py] = s.points[s.annotateAt];
         const cx = sx(px);
         const cy = sy(py);
-        const label = `${s.label}: ${formatNumber(py)}`;
+        const label = `${show(s.label)}: ${formatNumber(py)}`;
         const w = Math.min(420, label.length * 13 + 32);
         const bx = clamp(cx + 16, left, right - w);
         const by = clamp(cy - 62, top, bottom - 46);
@@ -183,7 +187,7 @@ export default function PlotRevealScene({ plan, t }: SceneProps<PlotRevealData>)
                 <rect x={-12} y={-6} width={262} height={34} rx={17} fill={PALETTE.paper} opacity={0.92} />
                 <line x1={0} x2={28} y1={10} y2={10} stroke={SERIES_COLORS[i % SERIES_COLORS.length]} strokeWidth={4} strokeLinecap="round" strokeDasharray={s.dashed ? "7 6" : undefined} />
                 <text x={38} y={18} fontSize={21} fill={PALETTE.ink}>
-                  {s.label.length > 22 ? `${s.label.slice(0, 21)}…` : s.label}
+                  {show(s.label).length > 22 ? `${show(s.label).slice(0, 21)}…` : show(s.label)}
                 </text>
               </g>
             );
@@ -193,7 +197,8 @@ export default function PlotRevealScene({ plan, t }: SceneProps<PlotRevealData>)
 
       {d.takeaway && d.takeawaySeg ? (() => {
         const q = ease.outCubic(progress(t, d.takeawaySeg));
-        const text = d.takeaway.length > 80 ? `${d.takeaway.slice(0, 79)}…` : d.takeaway;
+        const full = show(d.takeaway);
+        const text = full.length > 80 ? `${full.slice(0, 79)}…` : full;
         const w = Math.min(VIEW_W - 40, text.length * 13 + 52);
         return (
           <g opacity={q} transform={`translate(0 ${(1 - q) * 10})`}>

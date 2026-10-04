@@ -306,7 +306,16 @@ function inlineMath(text: string, macros: Record<string, string>): React.ReactNo
     } catch {
       html = "";
     }
-    out.push(html ? <span key={at} dangerouslySetInnerHTML={{ __html: html }} /> : raw);
+    out.push(
+      html ? (
+        <span key={at} dangerouslySetInnerHTML={{ __html: html }} />
+      ) : (
+        // KaTeX could not parse it: show readable math, never the source.
+        <span key={at} className="math-fallback">
+          {toUnicode(latex, macros)}
+        </span>
+      ),
+    );
     last = at + raw.length;
   }
   if (last < text.length) out.push(text.slice(last));
@@ -325,19 +334,44 @@ function prepareDisplay(latex: string): string {
   return body;
 }
 
-/** KaTeX renders synchronously, so equations never reflow the page mid-scroll. */
+/**
+ * A displayed equation, typeset — and, for readers who do not read the notation,
+ * readable aloud in plain English on request ("S equals the fraction Q K transpose
+ * over the square root of d sub k").
+ *
+ * KaTeX renders synchronously, so equations never reflow the page mid-scroll. When
+ * it cannot parse something, the fallback is Unicode math (√dₖ), never TeX source.
+ */
 function DisplayMath({ latex, macros }: { latex: string; macros: Record<string, string> }) {
+  const [inWords, setInWords] = useState(false);
   const html = useMemo(() => {
     try {
-      return katex.renderToString(prepareDisplay(latex), { displayMode: true, throwOnError: false, strict: "ignore", macros: { ...macros } });
+      return katex.renderToString(prepareDisplay(latex), { displayMode: true, throwOnError: true, strict: "ignore", macros: { ...macros } });
     } catch {
       return "";
     }
   }, [latex, macros]);
-  if (!html) {
-    return <pre className="scroll-x my-5 rounded-xl border-[1.5px] border-ink bg-wash p-3 text-xs">{latex}</pre>;
-  }
-  return <div className="scroll-x my-6 rounded-[var(--radius-tile)] border-[1.5px] border-line bg-paper px-4 py-3" dangerouslySetInnerHTML={{ __html: html }} />;
+  const reading = useMemo(() => (inWords ? toWords(latex, macros) : ""), [inWords, latex, macros]);
+  return (
+    <figure className="my-6 rounded-[var(--radius-tile)] border-[1.5px] border-line bg-paper">
+      {html ? (
+        <div className="scroll-x px-4 py-3" dangerouslySetInnerHTML={{ __html: html }} />
+      ) : (
+        <p className="math-fallback scroll-x px-4 py-3 text-center text-lg text-ink">{toUnicode(latex, macros)}</p>
+      )}
+      <figcaption className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t border-dashed border-line px-4 py-2 text-sm">
+        <button
+          type="button"
+          onClick={() => setInWords((v) => !v)}
+          aria-expanded={inWords}
+          className="shrink-0 font-medium text-ink-soft underline decoration-coral decoration-dotted underline-offset-4 hover:text-ink"
+        >
+          {inWords ? "Hide words" : "Read it in words"}
+        </button>
+        {inWords && reading ? <span className="text-ink-soft">{reading}</span> : null}
+      </figcaption>
+    </figure>
+  );
 }
 
 function Outline({ sections, active, withScenes }: { sections: Section[]; active: string | null; withScenes: Map<string, Scene[]> }) {

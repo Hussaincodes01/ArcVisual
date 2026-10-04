@@ -19,6 +19,8 @@ import {
   type SceneProps,
 } from "../../lib/scenes/core";
 import type { TransformChainData } from "../../lib/scenes/plans";
+import { plainText, prettifyPlainMath, splitMath, toUnicode } from "../../lib/tex";
+import { renderInlineTex } from "../MathText";
 
 const MATH_SIGNS = /[=^_\\+<>|/*{}()[\]∑∫√≤≥≈∝·×]/;
 
@@ -28,24 +30,47 @@ function looksLikeProse(step: string): boolean {
   return step.split(/\s+/).filter((w) => /^[A-Za-z‑-]{3,}$/.test(w)).length >= 4;
 }
 
-function render(raw: string, macros: Record<string, string>): string {
-  // Typeset prose as text so it stays readable; normalise the non-breaking hyphen
-  // models like to emit, which KaTeX has no glyph metrics for.
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+interface Rendered {
+  html: string;
+  /** A sentence (words with math in it) wraps like text; an equation stays on one line. */
+  wrap: boolean;
+}
+
+/**
+ * One derivation step as markup — always readable, never TeX source.
+ *
+ * Models sometimes write a sentence with math in it ("for any offset $k$, $PE_{pos+k}$
+ * is linear in…") where an equation belongs. Typeset whole, that is a parse error;
+ * the old fallback stripped its symbols and showed the remains, which read as
+ * nonsense. Now words stay words and each `$…$` is typeset in place.
+ */
+function render(raw: string, macros: Record<string, string>): Rendered {
+  // The non-breaking hyphen models like to emit has no KaTeX glyph metrics.
   const cleaned = raw.replace(/‑/g, "-");
-  const latex = looksLikeProse(cleaned) ? `\\text{${cleaned.replace(/[\\{}$&#^_%~]/g, " ")}}` : cleaned;
+  if (cleaned.includes("$")) {
+    const html = splitMath(cleaned)
+      .map((p) => {
+        if (!p.math) return escapeHtml(prettifyPlainMath(p.text));
+        return renderInlineTex(p.tex, macros) ?? `<span class="math-fallback">${escapeHtml(toUnicode(p.tex, macros))}</span>`;
+      })
+      .join("");
+    return { html, wrap: true };
+  }
+  if (looksLikeProse(cleaned)) return { html: escapeHtml(prettifyPlainMath(cleaned)), wrap: true };
   try {
-    return katex.renderToString(latex, {
+    const html = katex.renderToString(cleaned, {
       displayMode: true,
       throwOnError: true,
       strict: "ignore",
       macros: { ...macros }, // copied: KaTeX writes \gdef definitions into it
     });
+    return { html, wrap: false };
   } catch {
-    // Not valid LaTeX after all: typeset it as text rather than showing an error.
-    return katex.renderToString(`\\text{${latex.replace(/[\\{}$&#^_%~]/g, " ")}}`, {
-      displayMode: true,
-      throwOnError: false,
-    });
+    // Notation KaTeX cannot parse still reads as math: √dₖ, not \sqrt{d_k}.
+    return { html: `<span class="math-fallback">${escapeHtml(toUnicode(cleaned, macros))}</span>`, wrap: false };
   }
 }
 
@@ -106,23 +131,34 @@ export default function TransformChainScene({ plan, t, macros = NO_MACROS }: Sce
             transform: `translateY(${(1 - progress(t, titleSeg)) * -6}px)`,
           }}
         >
-          {title}
+          {plainText(title, macros)}
         </p>
       ) : null}
 
       {layers.map(({ i, opacity, dy, reveal, scale }) => {
         const useAccent = i === k && accentOn;
-        const markup = useAccent && accented[i] ? accented[i]! : html[i];
+        const markup = useAccent && accented[i] ? accented[i]! : html[i].html;
         const wholeAccent = useAccent && !accented[i];
+        const motion = {
+          opacity,
+          transform: `translateY(${dy * 100}cqh) scale(${scale})`,
+          clipPath: `inset(-20% ${(1 - reveal) * 100}% -20% 0)`,
+        };
+        if (html[i].wrap) {
+          // A sentence with math in it: wrap like text instead of shrinking one
+          // long line until it is unreadable.
+          return (
+            <div key={`${i}-${k}`} className="absolute inset-0 flex items-center justify-center" style={motion}>
+              <div
+                className="max-w-[84%] text-center"
+                style={{ fontSize: "3.5cqw", lineHeight: 1.5, color: wholeAccent ? PALETTE.coral : PALETTE.ink }}
+                dangerouslySetInnerHTML={{ __html: markup }}
+              />
+            </div>
+          );
+        }
         return (
-          <FitBox
-            key={`${i}-${k}`}
-            style={{
-              opacity,
-              transform: `translateY(${dy * 100}cqh) scale(${scale})`,
-              clipPath: `inset(-20% ${(1 - reveal) * 100}% -20% 0)`,
-            }}
-          >
+          <FitBox key={`${i}-${k}`} style={motion}>
             <div
               style={{ fontSize: "5cqw", color: wholeAccent ? PALETTE.coral : PALETTE.ink }}
               // KaTeX output of LaTeX copied verbatim from the paper.

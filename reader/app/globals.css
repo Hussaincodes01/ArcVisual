@@ -198,6 +198,13 @@ body {
   color: var(--color-ink);
 }
 
+/* Notation KaTeX could not parse, converted to Unicode math (√dₖ, ∇ᵩℒ): set in
+   KaTeX's own face so it reads as math beside typeset equations. */
+.math-fallback {
+  font-family: KaTeX_Main, "Times New Roman", serif;
+  font-style: italic;
+}
+
 .scrubber {
   appearance: none;
   -webkit-appearance: none;

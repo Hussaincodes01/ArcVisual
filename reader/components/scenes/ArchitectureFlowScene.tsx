@@ -22,6 +22,7 @@ import {
   type SceneProps,
 } from "../../lib/scenes/core";
 import type { ArchitectureFlowData, Node } from "../../lib/scenes/plans";
+import { plainText } from "../../lib/tex";
 
 interface Box {
   cx: number;
@@ -62,7 +63,10 @@ function exitPoint(b: Box, tx: number, ty: number, buff: number): [number, numbe
   return [b.cx + dx * s, b.cy + dy * s];
 }
 
-export default function ArchitectureFlowScene({ plan, t }: SceneProps<ArchitectureFlowData>) {
+export default function ArchitectureFlowScene({ plan, t, macros }: SceneProps<ArchitectureFlowData>) {
+  // SVG cannot hold KaTeX, so labels are converted to readable Unicode math:
+  // a label typed as `∇_φ L` becomes ∇ᵩ L, never source.
+  const show = (text: string) => plainText(text, macros);
   const d = plan.data;
   const markerId = `arrow-${useId().replace(/[^a-zA-Z0-9-]/g, "")}`;
   const boxes = layout(d.nodes);
@@ -107,7 +111,7 @@ export default function ArchitectureFlowScene({ plan, t }: SceneProps<Architectu
       viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
       className="absolute inset-0 h-full w-full"
       role="img"
-      aria-label={`Diagram: ${d.nodes.map((n) => n.label).join(", ")}`}
+      aria-label={`Diagram: ${d.nodes.map((n) => show(n.label)).join(", ")}`}
     >
       <defs>
         <marker id={markerId} viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
@@ -126,7 +130,8 @@ export default function ArchitectureFlowScene({ plan, t }: SceneProps<Architectu
         const [x2, y2] = exitPoint(b, a.cx, a.cy, 12);
         const mx = (x1 + x2) / 2;
         const my = (y1 + y2) / 2;
-        const label = e.label && e.label.length > 24 ? `${e.label.slice(0, 23)}…` : e.label;
+        const shown = e.label ? show(e.label) : null;
+        const label = shown && shown.length > 24 ? `${shown.slice(0, 23)}…` : shown;
         return (
           <g key={key}>
             <line
@@ -166,7 +171,7 @@ export default function ArchitectureFlowScene({ plan, t }: SceneProps<Architectu
         const b = boxes[n.id];
         const q = ease.outCubic(progress(t, d.nodeSeg[n.id]));
         if (q <= 0) return null;
-        const { size, lines } = fontFor(b, n.label);
+        const { size, lines } = fontFor(b, show(n.label));
         const lit = litNode === n.id;
         return (
           <g key={n.id} opacity={q} transform={`translate(${(1 - q) * -18} 0)`}>

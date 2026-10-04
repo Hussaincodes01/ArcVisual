@@ -16,6 +16,7 @@ import { mediaUrl } from "../lib/api";
 import { isClientScene, type Scene } from "../lib/types";
 import { ArcDots } from "./ArcLoader";
 import SceneCard from "./SceneCard";
+import MathText from "./MathText";
 
 interface Props {
   scene: Scene;
@@ -44,8 +45,12 @@ export default function SceneSlot({ scene, sectionHeading, mediaBase, originUrl,
           </p>
         </div>
         <figcaption className="mt-4 border-t-[1.5px] border-dashed border-line pt-3">
-          <p className="text-[0.95rem] font-medium leading-snug">{scene.spec.claim}</p>
-          <p className="mt-1.5 text-xs text-muted">{source}</p>
+          <p className="text-[0.95rem] font-medium leading-snug">
+            <MathText text={scene.spec.claim} macros={macros} />
+          </p>
+          <p className="mt-1.5 text-xs text-muted">
+            <MathText text={source} macros={macros} />
+          </p>
         </figcaption>
       </figure>
     );
@@ -75,8 +80,12 @@ export default function SceneSlot({ scene, sectionHeading, mediaBase, originUrl,
           {mp4 ? <source src={mp4} type="video/mp4" /> : null}
         </video>
         <figcaption className="mt-4 border-t-[1.5px] border-dashed border-line pt-3">
-          <p className="text-[0.95rem] font-medium leading-snug">{scene.spec.claim}</p>
-          <p className="mt-1.5 text-xs text-muted">{source}</p>
+          <p className="text-[0.95rem] font-medium leading-snug">
+            <MathText text={scene.spec.claim} macros={macros} />
+          </p>
+          <p className="mt-1.5 text-xs text-muted">
+            <MathText text={source} macros={macros} />
+          </p>
         </figcaption>
       </figure>
     );
@@ -85,7 +94,9 @@ export default function SceneSlot({ scene, sectionHeading, mediaBase, originUrl,
   return (
     <figure className="rounded-[var(--radius-card)] border-[1.5px] border-dashed border-ink bg-wash p-5">
       <p className="font-medium">This idea is explained in the text instead.</p>
-      <p className="mt-2 text-sm leading-relaxed text-ink-soft">{scene.spec.claim}</p>
+      <p className="mt-2 text-sm leading-relaxed text-ink-soft">
+        <MathText text={scene.spec.claim} macros={macros} />
+      </p>
       <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
         <a href={originUrl} target="_blank" rel="noreferrer" className="pill bg-paper hover:bg-mustard-soft">
           See the paper&rsquo;s own figure

@@ -11,6 +11,8 @@
 import { useState } from "react";
 import type { Beat } from "../lib/types";
 import Lightbox from "./Lightbox";
+import MathText from "./MathText";
+import { plainText } from "../lib/tex";
 import LiveScene from "./scenes/LiveScene";
 
 interface Props {
@@ -48,18 +50,24 @@ export default function SceneCard({
         archetype={archetype}
         params={params}
         beats={beats}
-        label={claim}
+        label={plainText(claim, macros)}
         autoplay={autoplay}
         loop={loop}
         onExpand={() => setEnlarged(true)}
         macros={macros}
       />
       <figcaption className="mt-4 border-t-[1.5px] border-dashed border-line pt-3">
-        <p className="text-[0.95rem] font-medium leading-snug text-ink">{claim}</p>
-        {source ? <p className="mt-1.5 text-xs text-muted">{source}</p> : null}
+        <p className="text-[0.95rem] font-medium leading-snug text-ink">
+          <MathText text={claim} macros={macros} />
+        </p>
+        {source ? (
+          <p className="mt-1.5 text-xs text-muted">
+            <MathText text={source} macros={macros} />
+          </p>
+        ) : null}
       </figcaption>
-      <Lightbox open={enlarged} onClose={() => setEnlarged(false)} title={claim}>
-        <LiveScene archetype={archetype} params={params} beats={beats} label={claim} autoplay="always" macros={macros} />
+      <Lightbox open={enlarged} onClose={() => setEnlarged(false)} title={plainText(claim, macros)}>
+        <LiveScene archetype={archetype} params={params} beats={beats} label={plainText(claim, macros)} autoplay="always" macros={macros} />
       </Lightbox>
     </figure>
   );
