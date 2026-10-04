@@ -14,6 +14,7 @@ rejection, not a guess.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass, field
 
@@ -45,8 +46,17 @@ _GRAPHICS_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\s*\{([^}]{1,200})\}
 _COMMENT_RE = re.compile(r"(?<!\\)%.*$", re.MULTILINE)
 _INPUT_RE = re.compile(r"\\(?:input|include)\s*\{([^}]{1,200})\}")
 
-# Environments whose bodies are not prose and must not reach the reader.
+#: Where a display equation sat in the prose. The reader typesets the section's
+#: equations at these markers, in order, instead of piling them up after the text.
+EQ_MARKER = "⟦eq⟧"
+
+# Environments whose bodies are not prose and must not reach the reader. Figures and
+# tables are extracted separately; left in, `\includegraphics[scale=0.6]{path}` lost
+# only its command name and its arguments showed up in the article as text.
 _DROP_ENVS = (
+    "figure",
+    "wrapfigure",
+    "table",
     "thebibliography",
     "tabular",
     "tabularx",
@@ -111,9 +121,55 @@ def _brace_arg(text: str, open_idx: int) -> tuple[str, int]:
     return text[open_idx + 1 : end - 1], end
 
 
-def strip_tex(text: str, *, keep_math: bool = False) -> str:
-    """Flatten TeX to readable prose. Lossy by design; never used for offsets."""
+def _drop_commands(text: str, names: tuple[str, ...]) -> str:
+    r"""Remove `\name{...}` (and `\href{..}{..}`'s second group), braces matched."""
+    pattern = re.compile(r"\\(?:" + "|".join(names) + r")\*?\s*(?:\[[^\]]*\])?\s*\{")
+    out: list[str] = []
+    pos = 0
+    while (m := pattern.search(text, pos)) is not None:
+        out.append(text[pos : m.start()])
+        try:
+            end = match_brace(text, m.end() - 1)
+        except ValueError:
+            return "".join(out) + text[m.start() :]  # unbalanced: leave the rest
+        if m.group(0).startswith("\\href") and end < len(text) and text[end] == "{":
+            with contextlib.suppress(ValueError):
+                end = match_brace(text, end)  # the link text goes too
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _blank_comments(text: str) -> str:
+    """Comments replaced by spaces of the same length, so offsets survive."""
+    return _COMMENT_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+
+_DISPLAY_MATH_RE = re.compile(
+    r"\\begin\{(?P<env>" + "|".join(re.escape(e) for e in _EQ_ENVS) + r")\}"
+    r"(?P<a>.*?)\\end\{(?P=env)\}"
+    r"|\$\$(?P<b>.+?)\$\$",
+    re.DOTALL,
+)
+
+
+def strip_tex(text: str, *, keep_math: bool = False, eq_markers: bool = False) -> str:
+    """Flatten TeX to readable prose. Lossy by design; never used for offsets.
+
+    ``eq_markers`` leaves :data:`EQ_MARKER` where each display equation was, in the
+    same order :func:`_find_equations` reports them, so the reader can put each
+    equation back where the author placed it.
+    """
     out = _COMMENT_RE.sub("", text)
+    if eq_markers:
+
+        def mark(m: re.Match[str]) -> str:
+            inner = m.group("a") if m.group("a") is not None else m.group("b")
+            if not _LABEL_RE.sub("", inner or "").strip():
+                return " "  # _find_equations skips empty blocks too
+            return f"\n\n{EQ_MARKER}\n\n"
+
+        out = _DISPLAY_MATH_RE.sub(mark, out)
     for env in _DROP_ENVS:
         out = re.sub(
             rf"\\begin\{{{re.escape(env)}\*?\}}.*?\\end\{{{re.escape(env)}\*?\}}",
@@ -123,16 +179,41 @@ def strip_tex(text: str, *, keep_math: bool = False) -> str:
         )
     if not keep_math:
         out = re.sub(r"\$\$(.+?)\$\$", " ", out, flags=re.DOTALL)
-    out = re.sub(r"\\(?:label|ref|eqref|cite[a-z]*|citep|citet)\s*\{[^}]*\}", "", out)
-    out = re.sub(r"\\(?:footnote|url|href)\s*\{[^}]*\}", "", out)
+    # Brace-matched, because a footnote routinely holds math with its own braces:
+    # a flat `\{[^}]*\}` stopped inside `\sum_{i=1}^{d_k}` and left half the
+    # footnote in the prose as garbled inline math.
+    out = _drop_commands(out, ("footnote", "thanks", "url", "href"))
+    # Inline math is set aside before any command is stripped, and restored at the
+    # end. Stripping ran over it too, so `$\frac{1}{\sqrt{d_k}}$` reached readers as
+    # `${1}{{d_k}}$` — notation that typesets, and is wrong.
+    maths: list[str] = []
+
+    def stash(m: re.Match[str]) -> str:
+        maths.append(m.group(0))
+        return f"\x00{len(maths) - 1}\x00"
+
+    out = re.sub(r"(?<!\\)\$[^$\n]{1,600}?(?<!\\)\$|\\\(.{1,600}?\\\)", stash, out)
+    out = re.sub(r"\\label\s*\{[^}]*\}", "", out)
+    # Run-in headings: authors write `\paragraph{Encoder:}The encoder...`.
+    out = re.sub(r"\\(?:sub)?paragraph\*?\s*\{([^}]*)\}\s*", r"\1 ", out)
+    # Keep a visible trace of a reference. Deleting it outright left sentences like
+    # "models such as and ." and "shown in Figure , respectively".
+    out = re.sub(r"\\(?:eqref|[cC]?ref|autoref)\s*\{[^}]*\}", "[ref]", out)
+    out = re.sub(r"\\(?:cite[a-zA-Z]*)\s*(?:\[[^\]]*\])?\s*\{[^}]*\}", "[cite]", out)
     for cmd in ("emph", "textbf", "textit", "texttt", "textsc", "mbox", "text"):
         out = re.sub(rf"\\{cmd}\s*\{{([^{{}}]*)\}}", r"\1", out)
     out = re.sub(r"\\begin\{[^}]*\}(?:\[[^\]]*\])?", "", out)
     out = re.sub(r"\\end\{[^}]*\}", "", out)
     out = re.sub(r"\\[a-zA-Z@]+\*?", "", out)
     out = out.replace("~", " ").replace("\\\\", "\n")
+    out = out.replace("``", "“").replace("''", "”")  # TeX quotes
+    # Braces left behind by commands just removed (`\paragraph{Encoder:}` became
+    # `{Encoder:}`). Inline math is still set aside here, so its braces are safe.
+    out = out.replace("{", "").replace("}", "")
+    out = re.sub(r"[ \t]+([.,;:])", r"\1", out)
     out = re.sub(r"[ \t]+", " ", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
+    out = re.sub(r"\x00(\d+)\x00", lambda m: maths[int(m.group(1))], out)
     return out.strip()
 
 
@@ -208,6 +289,126 @@ def inline_inputs(main: str, files: dict[str, str], depth: int = 1) -> str:
     return _INPUT_RE.sub(repl, main)
 
 
+# --------------------------------------------------------------------------- #
+# Author macros
+# --------------------------------------------------------------------------- #
+
+_MACRO_DEF = re.compile(
+    r"\\(newcommand|renewcommand|providecommand|DeclareRobustCommand|"
+    r"DeclareMathOperator|def)(\*?)"
+)
+#: Commands a browser typesetter does not know and that carry no meaning in math.
+_NOISE = re.compile(r"\\(?:xspace|relax|protect|nobreak|ignorespaces)\b\s*")
+_NUMBERING = re.compile(
+    r"\\(?:addtocounter|setcounter|stepcounter|refstepcounter|theequation|tag|"
+    r"nonumber|notag|eqno|leqno)\b"
+)
+#: Bodies that are page layout or TeX internals, not notation. Conference style
+#: files define dozens (`\AND`, `\Huge`, `\maketitle`); handed to a math
+#: typesetter they can only break equations that happen to share a name.
+_LAYOUT = re.compile(
+    r"@|\\(?:setlength|addtolength|[vh]skip|[vh]space|par\b|begin|end|fontsize|"
+    r"selectfont|linebreak|newline|[vh]fil|[vh]box|kern|penalty|pagestyle|"
+    r"thispagestyle|footnote|section|caption|label|ref\b|cite|item\b|input|include|"
+    r"usepackage|let\b|def\b|newcommand|renewcommand|global|expandafter|csname)"
+)
+
+
+def _strip_wrapper(body: str, command: str) -> str:
+    r"""`\ensuremath{X}` -> `X`, braces matched."""
+    token = f"\\{command}"
+    while (at := body.find(token)) != -1:
+        brace = body.find("{", at)
+        if brace == -1 or body[at + len(token) : brace].strip():
+            break
+        try:
+            end = match_brace(body, brace)
+        except ValueError:
+            break
+        body = body[:at] + body[brace + 1 : end - 1] + body[end:]
+    return body
+
+
+def extract_macros(sources: list[str], *, limit: int = 400) -> dict[str, str]:
+    r"""The paper's own macro definitions, as ``{"\\name": "expansion"}``.
+
+    Papers lean on private shorthand — `\pT`, `\bx`, `\LB` — defined in the
+    preamble or a local style file. Without the definitions a browser typesetter
+    shows every equation that uses one as red error text; observed on the VAE
+    paper, where most of the display math was unreadable. Optional-argument
+    defaults are dropped (no browser typesetter supports them); a definition that
+    is too long, or not a plain control word, is skipped rather than guessed at.
+    """
+    macros: dict[str, str] = {}
+    for raw in sources:
+        src = _blank_comments(raw)
+        pos = 0
+        while (m := _MACRO_DEF.search(src, pos)) is not None:
+            kind, star = m.group(1), m.group(2)
+            i = m.end()
+            pos = i
+            while i < len(src) and src[i] in " \t\n":
+                i += 1
+            # The macro's name: `{\name}` or a bare `\name`.
+            if src.startswith("{", i):
+                try:
+                    end = match_brace(src, i)
+                except ValueError:
+                    continue
+                name = src[i + 1 : end - 1].strip()
+                i = end
+            else:
+                nm = re.match(r"\\[A-Za-z@]+", src[i:])
+                if nm is None:
+                    continue
+                name = nm.group(0)
+                i += len(name)
+            if not re.fullmatch(r"\\[A-Za-z]+", name):
+                continue
+            if kind == "def":
+                params = re.match(r"(?:#\d)*\s*", src[i:])
+                i += params.end() if params else 0
+            elif kind != "DeclareMathOperator":
+                nargs = re.match(r"\s*\[\d\]", src[i:])
+                i += nargs.end() if nargs else 0
+                default = re.match(r"\s*\[[^\]]*\]", src[i:])
+                i += default.end() if default else 0
+            while i < len(src) and src[i] in " \t\n":
+                i += 1
+            if not src.startswith("{", i):
+                continue
+            try:
+                end = match_brace(src, i)
+            except ValueError:
+                continue
+            body = src[i + 1 : end - 1].strip()
+            pos = end
+            if kind == "DeclareMathOperator":
+                body = f"\\operatorname{star}{{{body}}}"
+            body = _NOISE.sub("", _strip_wrapper(body, "ensuremath")).strip()
+            if _NUMBERING.search(body):
+                # Equation-numbering shorthand (the VAE paper's `\eqnr`). Kept, but
+                # expanding to nothing: dropped, every equation using it would end
+                # in a red "undefined" error; expanded, it typesets counter code.
+                body = "{}"
+            if not body or len(body) > 600 or _LAYOUT.search(body):
+                continue
+            if kind == "providecommand" and name in macros:
+                continue
+            macros[name] = body
+            if len(macros) >= limit:
+                return macros
+    return macros
+
+
+def macro_sources(tex: str, files: dict[str, str]) -> list[str]:
+    """Where authors define macros: the preamble, then any local style files."""
+    start = tex.find("\\begin{document}")
+    preamble = tex[:start] if start != -1 else tex[:20000]
+    styles = [body for name, body in files.items() if name.lower().endswith(".sty")]
+    return [*styles, preamble]
+
+
 def document_body(tex: str) -> str:
     """Everything between ``\\begin{document}`` and ``\\end{document}``."""
     start = tex.find("\\begin{document}")
@@ -259,7 +460,7 @@ def parse(tex: str, *, paper_slug: str = "paper") -> ParsedDoc:
             id=sec_id,
             heading_path=list(heading_stack),
             raw=raw,
-            prose_md=strip_tex(raw),
+            prose_md=strip_tex(raw, eq_markers=True),
             char_offset=content_start,
         )
 
@@ -404,6 +605,10 @@ def _section_boundaries(body: str) -> list[tuple[str, str, int, int]]:
 def _find_equations(raw: str) -> list[tuple[str, str | None, bool, int, int]]:
     """Display-math blocks as ``(latex, label, display, lo, hi)`` offsets in raw."""
     out: list[tuple[str, str | None, bool, int, int]] = []
+    # Search a copy with comments blanked to the same length: offsets stay valid in
+    # `raw`, but a commented-out equation — authors keep old versions around — is no
+    # longer extracted and shown to readers as if it were part of the paper.
+    raw = _blank_comments(raw)
     for env in _EQ_ENVS:
         pattern = re.compile(
             rf"\\begin\{{{re.escape(env)}\}}(.*?)\\end\{{{re.escape(env)}\}}",

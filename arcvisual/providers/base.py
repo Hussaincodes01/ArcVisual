@@ -129,6 +129,10 @@ class Capabilities:
     #: and the request fails with "missing properties", losing the whole call. Asking
     #: for less is what makes the reply fit.
     analysis_item_budget: int | None = None
+    #: How many ANALYZE calls a paper may be split across when its body exceeds
+    #: `prompt_char_budget`. One call over a trimmed body sees a couple of sections;
+    #: several calls over different sections see most of the paper. 1 = single pass.
+    analysis_passes: int = 1
     #: Free-text note surfaced in the job report — how this provider is billed, what
     #: it cannot do. Read by humans looking at a cost anomaly.
     note: str = ""

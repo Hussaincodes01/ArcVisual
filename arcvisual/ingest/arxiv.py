@@ -32,8 +32,10 @@ from arcvisual.ingest.errors import IngestRejection, RejectCode
 from arcvisual.ingest.latex import (
     ParsedDoc,
     document_body,
+    extract_macros,
     find_main_tex,
     inline_inputs,
+    macro_sources,
     parse,
 )
 from arcvisual.storyboard import PaperMeta, Storyboard
@@ -341,6 +343,7 @@ def build_storyboard(meta: ArxivMetadata, source_blob: bytes) -> Storyboard:
             published=meta.published,
             origin_url=_ABS.format(arxiv_id=meta.arxiv_id),
             categories=[c for c in meta.categories if c][:6],
+            tex_macros=extract_macros(macro_sources(tex, files)),
         ),
         sections=parsed.sections,
         equations=parsed.equations,

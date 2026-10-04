@@ -1,12 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "arcvisual/render/vercel_app.py": {
+    "api/index.py": {
       "maxDuration": 300,
-      "excludeFiles": "{reader/**,tests/**,eval/**,eval-out/**,arcvisual-media/**,**/__pycache__/**,*.pdf,*.db}"
+      "excludeFiles": "{reader/**,tests/**,eval/**,eval-out/**,arcvisual-media/**,**/__pycache__/**,*.pdf,*.db,*.md}"
     }
   },
-  "crons": [
-    { "path": "/api/cron/sweep", "schedule": "17 6 * * *" }
-  ]
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
+  "crons": [{ "path": "/api/cron/sweep", "schedule": "17 6 * * *" }]
 }

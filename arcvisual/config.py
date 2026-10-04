@@ -15,7 +15,7 @@ from functools import lru_cache
 #: Bumped whenever pipeline behaviour changes in a way that should produce a
 #: different article for the same paper. Part of the L3 cache key and of the
 #: (paper_id, pipeline_version) idempotency key on `jobs`.
-PIPELINE_VERSION = "0.1.0-phase1"
+PIPELINE_VERSION = "0.2.0-serverless"
 
 #: Pinned render environment. Any change here invalidates every L2 artifact.
 MANIM_VERSION = "0.18.1"
@@ -111,6 +111,7 @@ class Poolside:
     #: per-paper cost metric a fiction. None => cost reported as unattributed.
     rate_in: float | None = None
     rate_out: float | None = None
+
     def model_for(self, task: str) -> str:
         return {
             "classify": self.classify,
@@ -154,8 +155,15 @@ class Groq:
     #: `qwen/qwen3.6-27b` started answering 404 "model_not_found" and took every job
     #: down with it, because a single hardcoded id had nothing to fall back to. The
     #: provider now walks this list and skips ids the server has declared gone.
+    #:
+    #: Analyze and codegen lead with DIFFERENT models on purpose: Groq meters tokens
+    #: per model, so splitting them gives each stage its own 8,000/minute instead of
+    #: sharing one. Measured on the real Transformer paper: gpt-oss-120b filled both
+    #: archetypes' parameters in 1.5-3.3s using ~1.3-1.9k prompt and ~0.5-0.8k
+    #: completion tokens; qwen3.8 produced the analysis cleanly but rate-limited when
+    #: it also had to carry every codegen call.
     classify: str = "qwen/qwen3.8-27b,openai/gpt-oss-120b"
-    codegen: str = "qwen/qwen3.8-27b,openai/gpt-oss-120b"
+    codegen: str = "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b"
     vision: str = ""
     temperature: float = 0.2
     timeout_s: float = 180.0
@@ -202,6 +210,12 @@ class Groq:
     #: properties: 'reading_note'". Eight concepts and the opportunities they carry
     #: fit inside the remaining ~5,200 tokens.
     analysis_item_budget: int = 6
+    #: ANALYZE passes over different sections of a long paper. Measured on the real
+    #: ResNet and VAE papers: a single 5,000-character pass sees one or two sections,
+    #: so every proposal cites them and the two-per-section triage cap discards most.
+    #: Passes alternate between the configured models, each with its own per-minute
+    #: allowance, so three passes cost little extra wall clock.
+    analysis_passes: int = 3
     #: USD per million tokens. None on the free tier, and left None rather than
     #: guessed on paid — a plausible wrong cost is worse than an honest gap.
     rate_in: float | None = None
@@ -464,7 +478,11 @@ def load_dotenv(path: str | os.PathLike[str] | None = None) -> int:
     # run. tests/conftest.py sets this before importing anything.
     if os.environ.get("ARCVISUAL_NO_DOTENV") == "1":
         return 0
-    root = pathlib.Path(path) if path else pathlib.Path(__file__).resolve().parent.parent / ".env"
+    root = (
+        pathlib.Path(path)
+        if path
+        else pathlib.Path(__file__).resolve().parent.parent / ".env"
+    )
     try:
         text = root.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -540,6 +558,7 @@ def settings() -> Settings:
             analysis_item_budget=int(
                 env("GROQ_ANALYSIS_ITEMS", str(Groq.analysis_item_budget))
             ),
+            analysis_passes=int(env("GROQ_ANALYSIS_PASSES", str(Groq.analysis_passes))),
             max_tokens=int(env("GROQ_MAX_TOKENS", str(Groq.max_tokens))),
             max_tokens_codegen=int(
                 env("GROQ_MAX_TOKENS_CODEGEN", str(Groq.max_tokens_codegen))

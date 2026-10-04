@@ -48,7 +48,8 @@ def ensure_schema(engine: Engine) -> str:
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
     cfg.set_main_option(
-        "sqlalchemy.url", engine.url.render_as_string(hide_password=False).replace("%", "%%")
+        "sqlalchemy.url",
+        engine.url.render_as_string(hide_password=False).replace("%", "%%"),
     )
     with engine.begin() as conn:
         if engine.dialect.name == "postgresql":

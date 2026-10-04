@@ -93,7 +93,11 @@ def test_latex_survives_into_the_module_byte_exact() -> None:
     """A custom scene's value is showing the paper's OWN notation. If a backslash is
     lost between the model's JSON and the emitted module, the formula silently
     becomes a different formula."""
-    latex = 'eq = m.MathTex(r"' + r"\text{softmax}\left(\frac{QK^{T}}{\sqrt{d_k}}\right)V" + '")'
+    latex = (
+        'eq = m.MathTex(r"'
+        + r"\text{softmax}\left(\frac{QK^{T}}{\sqrt{d_k}}\right)V"
+        + '")'
+    )
     out = CustomSceneOut(body=GOOD_BODY + "\n" + latex, captions=["x"])
     source = render_custom_module(_spec(), out)
     assert r"\text{softmax}" in source

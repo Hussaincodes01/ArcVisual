@@ -45,12 +45,14 @@ log = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 
-#: One meter per key, shared by every provider instance in this process.
+#: One meter per (key, model), shared by every provider instance in this process.
 #:
 #: The budget belongs to the *key*, not to an object: scene lanes each build their
 #: own provider, and per-instance meters would let four lanes each believe they had
-#: the whole 8,000 TPM and collectively ask for 32,000.
-_METERS: dict[tuple[str, int], TokenBudget] = {}
+#: the whole 8,000 TPM and collectively ask for 32,000. It is also per *model*:
+#: Groq meters each model separately, and one shared bucket made analyze on one
+#: model wait behind codegen on another for allowance that was never contended.
+_METERS: dict[tuple[str, str, int], TokenBudget] = {}
 _METERS_LOCK = threading.Lock()
 
 #: Model ids the server has answered with "model_not_found" in this process. Shared
@@ -59,10 +61,10 @@ _METERS_LOCK = threading.Lock()
 _UNAVAILABLE: set[str] = set()
 
 
-def _meter_for(api_key: str, tpm: int) -> TokenBudget | None:
+def _meter_for(api_key: str, tpm: int, model: str = "") -> TokenBudget | None:
     if tpm <= 0:
         return None
-    fingerprint = (hashlib.sha256(api_key.encode()).hexdigest()[:16], tpm)
+    fingerprint = (hashlib.sha256(api_key.encode()).hexdigest()[:16], model, tpm)
     with _METERS_LOCK:
         meter = _METERS.get(fingerprint)
         if meter is None:
@@ -116,7 +118,7 @@ class GroqProvider(OpenAICompatProvider):
         return max(1, min(requested, self._cfg.max_tokens_for(model, task)))
 
     def _token_budget(self, model: str = "") -> TokenBudget | None:
-        return _meter_for(self._cfg.api_key, self._cfg.tpm_for(model))
+        return _meter_for(self._cfg.api_key, self._cfg.tpm_for(model), model)
 
     def supports_json_schema(self, model: str = "") -> bool:
         """Whether *this model* enforces the schema.
@@ -137,11 +139,25 @@ class GroqProvider(OpenAICompatProvider):
         # then still reaches a live model instead of failing every job.
         builtin = Groq().models_for(task.value)
         chain = configured + [m for m in builtin if m not in configured]
-        live = [m for m in chain if m not in _UNAVAILABLE]
-        # Every id rejected: try them all again rather than refusing to call at
-        # all. A transient 404 during a provider incident should not poison the
-        # process for good.
-        return live or chain
+        live = [m for m in chain if m not in _UNAVAILABLE] or chain
+        # Every id rejected: `or chain` tries them all again rather than refusing
+        # to call at all. A transient 404 during a provider incident should not
+        # poison the process for good.
+        k = getattr(self, "_rotation", 0) % len(live) if live else 0
+        return live[k:] + live[:k]
+
+    def rotated(self, n: int) -> GroqProvider:
+        """This provider with its model preference rotated by `n`.
+
+        Groq meters tokens per model, so consecutive ANALYZE passes that lead with
+        different models each draw on a fresh allowance instead of queueing behind
+        one another on the first.
+        """
+        import copy
+
+        twin = copy.copy(self)
+        twin._rotation = n
+        return twin
 
     def mark_unavailable(self, model: str) -> None:
         with _METERS_LOCK:
@@ -167,6 +183,7 @@ class GroqProvider(OpenAICompatProvider):
             # slow answer. ~4 chars/token, and half the allowance left for the reply.
             prompt_char_budget=self._cfg.prompt_budget_for(analyze_model),
             analysis_item_budget=self._cfg.analysis_item_budget,
+            analysis_passes=max(1, self._cfg.analysis_passes),
             note=(
                 (
                     f"{analyze_model} for analyze / "

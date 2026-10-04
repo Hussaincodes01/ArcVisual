@@ -1,66 +1,141 @@
 @import "tailwindcss";
 
 /*
- * The style contract, mirrored from arcvisual/templates/base.py. These are the
- * same hex values the Manim templates render with, which is what makes an
- * animation look like part of the page rather than a video embedded in it.
- * If one side changes, both change.
+ * ArcVisual design tokens.
+ *
+ * Sampled from the reference concept: an off-white canvas, ink outlines, and three
+ * flat accents — coral for action, lavender and mustard for structure. The same
+ * values drive the live scene renderer (components/scenes), so an animation reads as
+ * part of the page rather than as media dropped into it.
  */
 @theme {
-  --color-canvas: #0e1116;
-  --color-surface: #161b22;
-  --color-border: #30363d;
-  --color-fg: #e6edf3;
-  --color-muted: #7d8590;
-  --color-accent: #58a6ff;
-  --color-warn: #f0883e;
-  --color-good: #3fb950;
+  --color-canvas: #f7f7f5;
+  --color-paper: #ffffff;
+  --color-ink: #151313;
+  --color-ink-soft: #4a4643;
+  --color-muted: #6f6a66;
+  --color-line: #e6e3dc;
+  --color-wash: #efede7;
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-serif: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+  --color-coral: #ff5734;
+  --color-coral-deep: #e8431f;
+  --color-lavender: #be94f5;
+  --color-lavender-soft: #ece1fd;
+  --color-mustard: #fccc42;
+  --color-mustard-soft: #fff3cc;
+  --color-violet: #7a4fd6;
 
-  /* A readable measure. The plan says ~65ch and means it. */
-  --measure: 65ch;
+  --color-good: #1f8a4c;
+  --color-warn: #b5470f;
+
+  --font-sans: var(--font-lexend), ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    sans-serif;
+
+  --radius-card: 1.5rem;
+  --radius-tile: 1.125rem;
+
+  /* A readable measure for article prose. */
+  --measure: 68ch;
 }
 
 html {
   scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
   background-color: var(--color-canvas);
-  color: var(--color-fg);
+  color: var(--color-ink);
   font-family: var(--font-sans);
+  font-feature-settings: "ss01";
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-/* Prose: serif body at a comfortable measure, because this is for reading. */
-.prose-arc {
-  max-width: var(--measure);
-  font-family: var(--font-serif);
-  font-size: 1.0625rem;
-  line-height: 1.75;
-  color: var(--color-fg);
+::selection {
+  background: var(--color-mustard);
+  color: var(--color-ink);
 }
 
-.prose-arc p {
-  margin-block: 1.1em;
+/* One visible focus treatment everywhere: an ink ring with a canvas gap. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2.5px solid var(--color-ink);
+  outline-offset: 3px;
+  border-radius: 0.6rem;
 }
 
-.prose-arc p:first-child {
-  margin-block-start: 0;
+/* ------------------------------------------------------------------------- */
+/* Shared surfaces                                                           */
+/* ------------------------------------------------------------------------- */
+
+/* The reference's signature: a flat card with a confident ink outline. */
+.outlined {
+  border: 1.5px solid var(--color-ink);
+  background: var(--color-paper);
 }
 
-/* KaTeX inherits the page palette rather than shipping its own. */
-.katex {
-  color: var(--color-fg);
-  font-size: 1em;
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 999px;
+  border: 1.5px solid var(--color-ink);
+  padding: 0.18rem 0.7rem;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  white-space: nowrap;
 }
 
-.katex-display {
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding-block: 0.35rem;
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.9rem;
+  border: 1.5px solid var(--color-ink);
+  padding: 0.8rem 1.4rem;
+  font-weight: 500;
+  line-height: 1.2;
+  transition:
+    transform 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn-coral {
+  background: var(--color-coral);
+  color: #fff;
+}
+
+.btn-coral:hover {
+  background: var(--color-coral-deep);
+}
+
+.btn-ink {
+  background: var(--color-ink);
+  color: #fff;
+}
+
+.btn-ink:hover {
+  background: #2c2826;
+}
+
+.btn-ghost {
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+
+.btn-ghost:hover {
+  background: var(--color-wash);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Wide content scrolls inside its own box; the page never scrolls sideways. */
@@ -69,21 +144,118 @@ body {
   max-width: 100%;
 }
 
-/* Respect the reader's motion preference: poster plus an explicit play control. */
-@media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
+/* ------------------------------------------------------------------------- */
+/* Article prose                                                             */
+/* ------------------------------------------------------------------------- */
 
-  .reduced-motion-hide {
-    display: none;
-  }
+.prose-arc {
+  max-width: var(--measure);
+  font-size: 1.0625rem;
+  line-height: 1.8;
+  color: var(--color-ink-soft);
 }
 
-/* The sticky visual stage. Falls back to inline flow on narrow viewports. */
+.prose-arc p {
+  margin-block: 1.05em;
+}
+
+.prose-arc p:first-child {
+  margin-block-start: 0;
+}
+
+.katex {
+  font-size: 1.04em;
+  color: var(--color-ink);
+}
+
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.4rem;
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Live scenes                                                               */
+/* ------------------------------------------------------------------------- */
+
+.scene-stage {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  /* Scene text is sized in cqw/cqh, so one scene reads the same in the hero, the
+     article column and the enlarged view. */
+  container-type: size;
+  overflow: hidden;
+  border-radius: var(--radius-tile);
+  background-color: var(--color-paper);
+  background-image: radial-gradient(var(--color-line) 1px, transparent 1px);
+  background-size: 22px 22px;
+  background-position: 11px 11px;
+}
+
+.scene-stage .katex {
+  color: var(--color-ink);
+}
+
+.scrubber {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 1.25rem;
+  background: transparent;
+  cursor: pointer;
+}
+
+.scrubber::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--color-ink) 0%,
+    var(--color-ink) var(--fill, 0%),
+    var(--color-line) var(--fill, 0%),
+    var(--color-line) 100%
+  );
+}
+
+.scrubber::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-line);
+}
+
+.scrubber::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-ink);
+}
+
+.scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  margin-top: -6px;
+  height: 18px;
+  width: 18px;
+  border-radius: 999px;
+  border: 2px solid var(--color-ink);
+  background: var(--color-mustard);
+}
+
+.scrubber::-moz-range-thumb {
+  height: 15px;
+  width: 15px;
+  border-radius: 999px;
+  border: 2px solid var(--color-ink);
+  background: var(--color-mustard);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Article layout                                                            */
+/* ------------------------------------------------------------------------- */
+
 .stage {
   position: sticky;
-  top: 4rem;
+  top: 5.5rem;
   align-self: start;
 }
 
@@ -93,64 +265,53 @@ body {
   }
 }
 
-.slot-enter {
-  animation: slot-fade 320ms ease-out both;
-}
-
-@keyframes slot-fade {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
 /* ------------------------------------------------------------------------- */
-/* Loading animations                                                        */
+/* Working indicators                                                        */
 /*                                                                           */
-/* All of these animate only `transform` and `opacity`, or `background-       */
-/* position` on a fixed-size gradient — properties the compositor handles     */
-/* without laying out or painting. That matters here specifically: these run  */
-/* on the same page as decoding video, and a loader that triggers layout      */
-/* would stutter the thing the reader actually came for.                      */
-/*                                                                           */
-/* Every one is disabled under prefers-reduced-motion at the bottom of this   */
-/* file. Where an animation carries information (a working indicator), the    */
-/* static form stays visible rather than vanishing.                          */
+/* Only transform/opacity animate. Under reduced motion they dim rather than */
+/* disappear: a reader who asked for less motion still needs to know that    */
+/* work is happening.                                                        */
 /* ------------------------------------------------------------------------- */
 
-/* Skeleton shimmer. A travelling highlight over a surface-coloured block. */
 .shimmer {
-  background-color: var(--color-surface);
-  background-image: linear-gradient(
-    90deg,
-    transparent 0%,
-    color-mix(in oklab, var(--color-fg) 7%, transparent) 45%,
-    color-mix(in oklab, var(--color-fg) 10%, transparent) 50%,
-    color-mix(in oklab, var(--color-fg) 7%, transparent) 55%,
-    transparent 100%
+  background: linear-gradient(
+    100deg,
+    var(--color-wash) 20%,
+    var(--color-paper) 40%,
+    var(--color-wash) 60%
   );
-  background-size: 220% 100%;
-  background-repeat: no-repeat;
-  animation: shimmer-sweep 1.7s ease-in-out infinite;
+  background-size: 300% 100%;
+  animation: shimmer 1.6s linear infinite;
 }
 
-@keyframes shimmer-sweep {
+@keyframes shimmer {
   from {
-    background-position: -110% 0;
+    background-position: 100% 0;
   }
   to {
-    background-position: 110% 0;
+    background-position: -50% 0;
   }
 }
 
-/* Indeterminate arc: rotation only, so the dash geometry stays put. */
+.arc-pulse {
+  animation: arc-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes arc-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 .arc-spin {
+  transform-origin: center;
   animation: arc-spin 1.1s linear infinite;
-  transform-origin: 50% 50%;
 }
 
 @keyframes arc-spin {
@@ -159,173 +320,66 @@ body {
   }
 }
 
-/* Determinate arc: ease the dash offset so progress slides rather than jumps. */
-.arc-progress {
-  transition: stroke-dashoffset 700ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-/* The "this stage is active" dot. */
-.arc-pulse {
-  animation: arc-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes arc-pulse {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.45;
-    transform: scale(0.72);
-  }
-}
-
-/* Three settling dots, offset by inline animation-delay. */
 .arc-dot {
   animation: arc-dot 1.2s ease-in-out infinite;
 }
 
+.arc-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.arc-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
 @keyframes arc-dot {
   0%,
-  60%,
+  80%,
   100% {
     opacity: 0.25;
     transform: translateY(0);
   }
-  30% {
+  40% {
     opacity: 1;
-    transform: translateY(-2px);
+    transform: translateY(-3px);
+  }
+}
+
+/* The hero's single orchestrated entrance. */
+.hero-rise {
+  animation: hero-rise 700ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes hero-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .slot-enter,
-  .arc-spin,
+  html {
+    scroll-behavior: auto;
+  }
+
+  .shimmer,
   .arc-pulse,
+  .arc-spin,
   .arc-dot,
-  .shimmer {
+  .hero-rise {
     animation: none;
   }
 
-  .arc-progress {
-    transition: none;
-  }
-
-  /* The shimmer's motion is decorative, so it goes — but the block must stay
-     visible, or a reduced-motion reader loses the placeholder entirely. */
   .shimmer {
-    background-image: none;
-    background-color: var(--color-surface);
-  }
-
-  /* Same reasoning for the indicators: dim rather than gone, so "working" is
-     still legible without movement. */
-  .arc-pulse,
-  .arc-dot {
     opacity: 0.7;
   }
-}
 
-/* ------------------------------------------------------------------------- */
-/* Landing page                                                              */
-/* ------------------------------------------------------------------------- */
-
-/* Scroll-triggered reveal. Transform + opacity only, so it composites. */
-.reveal {
-  opacity: 0;
-  transform: translateY(14px);
-  transition:
-    opacity 620ms cubic-bezier(0.22, 1, 0.36, 1),
-    transform 620ms cubic-bezier(0.22, 1, 0.36, 1);
-  will-change: opacity, transform;
-}
-
-.reveal-in {
-  opacity: 1;
-  transform: none;
-}
-
-/* A caption or line that swaps as a demo advances. Short and slight: the reader
-   is meant to notice the CHANGE, not the animation. */
-.demo-caption {
-  animation: caption-in 420ms ease-out both;
-}
-
-@keyframes caption-in {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-.demo-equation {
-  animation: equation-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-@keyframes equation-in {
-  from {
-    opacity: 0;
-    transform: scale(0.985);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-/* The accented sub-expression, mirroring Manim's Indicate. */
-.accent-glow {
-  color: var(--color-accent);
-  animation: accent-glow 1.4s ease-out both;
-  display: inline-block;
-}
-
-@keyframes accent-glow {
-  0% {
-    transform: scale(1);
-  }
-  35% {
-    transform: scale(1.12);
-  }
-  100% {
-    transform: scale(1);
-  }
-}
-
-/* The hero's derivation must FIT its card. KaTeX display math never wraps, so an
-   equation wider than the column is simply clipped — which reads as a broken page,
-   not as scrollable content. Scaling with the viewport keeps the whole expression
-   visible from a phone to a wide desktop; the overflow-x on .scroll-x stays only as
-   a last-resort safety net for a pathologically long line. */
-.demo-equation .katex-display {
-  margin: 0;
-  font-size: clamp(0.62rem, 1.55vw, 1rem);
-}
-
-.demo-equation .katex-display > .katex {
-  max-width: 100%;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .reveal {
-    opacity: 1;
-    transform: none;
-    transition: none;
-  }
-
-  .demo-caption,
-  .demo-equation,
-  .accent-glow {
-    animation: none;
-  }
-
-  /* The accent still has to read as an accent without the scale pulse. */
-  .accent-glow {
-    color: var(--color-accent);
+  .arc-pulse,
+  .arc-dot {
+    opacity: 0.6;
   }
 }

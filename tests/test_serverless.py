@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from arcvisual.db import repo
 from arcvisual.db.models import Base, Job
@@ -207,7 +206,10 @@ def test_the_gallery_lists_finished_articles(api) -> None:
 def test_the_cron_sweep_is_closed_without_its_secret(api, reset_settings) -> None:
     assert api.get("/api/cron/sweep").status_code == 403
     reset_settings(CRON_SECRET="s3cret")
-    assert api.get("/api/cron/sweep", headers={"authorization": "Bearer no"}).status_code == 403
+    assert (
+        api.get("/api/cron/sweep", headers={"authorization": "Bearer no"}).status_code
+        == 403
+    )
     job_id = api.post("/api/jobs", json={"url": URL}).json()["job_id"]
     swept = api.get("/api/cron/sweep", headers={"authorization": "Bearer s3cret"})
     assert swept.status_code == 200
@@ -223,7 +225,9 @@ def _client_archetypes():
     return CLIENT_RENDERABLE
 
 
-def test_client_mode_never_offers_an_archetype_the_browser_cannot_draw(client_mode) -> None:
+def test_client_mode_never_offers_an_archetype_the_browser_cannot_draw(
+    client_mode,
+) -> None:
     from arcvisual.analyze.prompts import archetype_help
     from arcvisual.templates import registry
 
@@ -247,7 +251,10 @@ def test_video_mode_still_offers_custom_scenes() -> None:
     ("given", "expected"),
     [
         ("postgres://u:p@h/db", "postgresql+psycopg://u:p@h/db"),
-        ("postgresql://u:p@h/db?sslmode=require", "postgresql+psycopg://u:p@h/db?sslmode=require"),
+        (
+            "postgresql://u:p@h/db?sslmode=require",
+            "postgresql+psycopg://u:p@h/db?sslmode=require",
+        ),
         ("postgresql+psycopg://u:p@h/db", "postgresql+psycopg://u:p@h/db"),
         ("sqlite+pysqlite:///x.db", "sqlite+pysqlite:///x.db"),
     ],
@@ -385,7 +392,9 @@ def test_an_ordinary_404_is_not_mistaken_for_a_retired_model(reset_settings) -> 
         ("groq/compound", ""),
     ],
 )
-def test_reasoning_effort_matches_what_each_model_accepts(model: str, expected: str) -> None:
+def test_reasoning_effort_matches_what_each_model_accepts(
+    model: str, expected: str
+) -> None:
     from arcvisual.config import Groq
 
     assert Groq(reasoning_effort="none").effort_for(model) == expected
@@ -397,3 +406,74 @@ def test_the_default_groq_models_are_a_fallback_chain() -> None:
     models = Groq().models_for("classify")
     assert len(models) >= 2, "a single model id is one retirement away from an outage"
     assert "qwen/qwen3.6-27b" not in models, "retired upstream"
+
+
+# -- multi-pass analysis ---------------------------------------------------- #
+
+
+def test_a_long_paper_is_analysed_in_prioritised_passes() -> None:
+    from arcvisual.analyze.single_pass import plan_passes
+
+    sb = build_storyboard(metadata(), paper_tarball())
+    single = plan_passes(sb, None, 3)
+    assert len(single) == 1, "no budget means one pass over everything"
+    groups = plan_passes(sb, 900, 3)
+    assert 1 < len(groups) <= 3
+    flat = [sid for g in groups for sid in g]
+    assert len(flat) == len(set(flat)), "a section is analysed once"
+    order = [s.id for s in sb.sections]
+    for g in groups:
+        assert g == sorted(g, key=order.index), "each pass reads in document order"
+
+
+def test_one_failed_pass_does_not_lose_the_others() -> None:
+    from arcvisual.analyze import single_pass
+    from arcvisual.analyze.prompts import AnalysisOut, ConceptOut
+    from arcvisual.providers.base import Capabilities, RetryableProviderError
+
+    sb = build_storyboard(metadata(), paper_tarball())
+    groups = single_pass.plan_passes(sb, 900, 3)
+    assert len(groups) >= 2
+    calls = {"n": 0}
+
+    class Stub:
+        name = "stub"
+
+        def capabilities(self):
+            return Capabilities(
+                name="stub",
+                native_structured_output=True,
+                prompt_cache=False,
+                vision=False,
+                cost_attributed=True,
+                prompt_char_budget=900,
+                analysis_passes=3,
+            )
+
+    def fake_call(sub, provider):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RetryableProviderError("rate limited")
+        section = next(s for s in sub.sections if len(s.raw) > 80)
+        quote = section.raw[:60]
+        out = AnalysisOut(
+            concepts=[
+                ConceptOut(
+                    name=f"Idea {calls['n']}",
+                    statement="A grounded idea from this pass.",
+                    section_id=section.id,
+                    quote=quote,
+                    centrality=0.8,
+                )
+            ]
+        )
+        return out, single_pass.AnalyzeReport(provider="stub")
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(single_pass, "_call_provider", fake_call)
+        out, report = single_pass._call_in_passes(sb, Stub(), groups)
+    assert calls["n"] == len(groups)
+    assert len(out.concepts) == len(groups) - 1
+    assert any("passes" in n for n in report.notes)

@@ -45,8 +45,9 @@ _MESSAGES: dict[RejectCode, str] = {
         "We could not work out which paper that URL points to."
     ),
     RejectCode.SOURCE_UNAVAILABLE: (
-        "The paper's source files are not available from arXiv, and we could not "
-        "fall back to another format."
+        "We could not get this paper's LaTeX source from arXiv. Some papers are "
+        "posted only as a PDF, which ArcVisual cannot read yet; if this one does "
+        "have source, arXiv may be busy, so try again in a minute."
     ),
     RejectCode.PARSE_FAILED: (
         "We could not read this paper's structure well enough to explain it."
@@ -67,8 +68,10 @@ class IngestRejection(Exception):
 
     @property
     def user_facing(self) -> str:
-        base = _MESSAGES[self.code]
-        return f"{base} ({self.detail})" if self.detail else base
+        """Plain language only. `detail` is for developers and goes in `message`:
+        appended here it showed readers lines like "needs the PDF rung of the
+        resolution ladder, which Phase 1 does not implement"."""
+        return _MESSAGES[self.code]
 
     def as_failure(self) -> dict[str, str]:
         """Shape stored in ``jobs.failure`` and returned by the API."""

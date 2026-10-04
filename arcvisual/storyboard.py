@@ -136,6 +136,9 @@ class PaperMeta(BaseModel):
     origin_url: str
     #: arXiv subject classes, primary first (e.g. ``cs.LG``). Display only.
     categories: list[str] = []
+    #: The paper's own LaTeX macros (``{"\pT": "p_{\theta}"}``), handed to the
+    #: reader's typesetter so equations written in the author's shorthand render.
+    tex_macros: dict[str, str] = {}
 
 
 class Equation(BaseModel):

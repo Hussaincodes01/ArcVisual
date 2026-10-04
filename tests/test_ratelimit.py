@@ -22,7 +22,9 @@ from arcvisual.providers.ratelimit import (
 
 
 class _Resp:
-    def __init__(self, status: int, headers: dict | None = None, body: dict | None = None):
+    def __init__(
+        self, status: int, headers: dict | None = None, body: dict | None = None
+    ):
         self.status_code = status
         self.headers = headers or {}
         self._body = body or {}
@@ -168,7 +170,9 @@ def test_parse_duration_handles_groqs_formats(text: str, expected: float) -> Non
 
 def test_retry_after_prefers_the_servers_guidance_and_caps_it() -> None:
     assert retry_after_seconds({"retry-after": "5"}) == 5.0
-    assert retry_after_seconds({"x-ratelimit-reset-tokens": "217ms"}) == pytest.approx(0.217)
+    assert retry_after_seconds({"x-ratelimit-reset-tokens": "217ms"}) == pytest.approx(
+        0.217
+    )
     # 7m12s is real, but a TPM allowance refills continuously; sleeping that long
     # is never the right answer and once turned a minutes-long job into two hours.
     assert retry_after_seconds({"x-ratelimit-reset-tokens": "7m12s"}) == 20.0
@@ -179,7 +183,9 @@ def test_retry_after_ignores_the_daily_request_quota() -> None:
     """`x-ratelimit-reset-requests` reports the DAILY request budget — observed at
     "43m12s" with 970 of 1000 left. Treating it as a token-limit backoff would idle
     every lane for the full 60s cap over a limit that was not the one we hit."""
-    assert retry_after_seconds({"x-ratelimit-reset-requests": "43m12s"}, default=3.0) == 3.0
+    assert (
+        retry_after_seconds({"x-ratelimit-reset-requests": "43m12s"}, default=3.0) == 3.0
+    )
 
 
 # -- the provider ----------------------------------------------------------- #
@@ -317,7 +323,9 @@ def test_source_sha_is_safe_under_concurrency() -> None:
 
     assert not errors, f"concurrent source_sha raised: {errors[:3]}"
     disagreeing = {k: v for k, v in digests.items() if len(v) != 1}
-    assert not disagreeing, f"same object hashed differently across threads: {disagreeing}"
+    assert not disagreeing, (
+        f"same object hashed differently across threads: {disagreeing}"
+    )
 
 
 def test_build_prompt_actually_applies_the_char_budget() -> None:
@@ -374,7 +382,9 @@ def test_harden_schema_drops_cosmetic_constraints_but_keeps_meaningful_ones() ->
     _harden_schema(schema)
     text = json.dumps(schema)
 
-    assert "maxLength" not in text, "cosmetic: the client clamps it, so it must not reject"
+    assert "maxLength" not in text, (
+        "cosmetic: the client clamps it, so it must not reject"
+    )
     assert "pattern" not in text
     assert "minLength" in text, "structural: grounding needs a real quote"
     assert "enum" in text, "structural: the archetype taxonomy is a closed set"

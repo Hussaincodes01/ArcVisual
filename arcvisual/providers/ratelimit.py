@@ -66,7 +66,9 @@ def daily_limit_detail(body: str) -> str:
     again = re.search(r"try again in ([\dhms.]+)", body)
     parts = []
     if used:
-        parts.append(f"{int(used.group(2)):,} of {int(used.group(1)):,} daily tokens used")
+        parts.append(
+            f"{int(used.group(2)):,} of {int(used.group(1)):,} daily tokens used"
+        )
     if again:
         parts.append(f"resets in {again.group(1)}")
     return "; ".join(parts) or "daily quota exhausted"

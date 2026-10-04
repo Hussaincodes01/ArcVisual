@@ -289,7 +289,9 @@ def build_api(orchestrate: Any | None = None, *, stepped: bool | None = None):
         limit = max(1, min(limit, 48))
         # Edge-cached briefly: the gallery is read on every landing visit and changes
         # only when an article finishes, so this keeps it off the database.
-        response.headers["Cache-Control"] = "public, s-maxage=60, stale-while-revalidate=600"
+        response.headers["Cache-Control"] = (
+            "public, s-maxage=60, stale-while-revalidate=600"
+        )
         return {"papers": repo.recent_papers(session, limit=limit)}
 
     @api.get("/api/papers/{slug}")

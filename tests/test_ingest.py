@@ -222,3 +222,131 @@ def test_rejections_carry_reader_facing_text() -> None:
         failure = IngestRejection(code, "detail").as_failure()
         assert failure["user_facing"]
         assert failure["code"] == code.value
+
+
+# -- prose the reader actually sees ----------------------------------------- #
+
+_PROSE_TEX = r"""Intro text here.
+\begin{figure}[t]\includegraphics[scale=0.6]{Figures/ModalNet-21}\caption{The model.}\end{figure}
+More text $x_1$ and
+\begin{equation*}a=b\label{e1}\end{equation*}
+% \begin{equation} an old draft \end{equation}
+tail $$c=d$$ end."""
+
+
+def test_figure_arguments_never_leak_into_prose() -> None:
+    """Observed on the Transformer paper: `[scale=0.6]{Figures/ModalNet-21}` sat at
+    the top of the Model Architecture section, as text."""
+    out = strip_tex(_PROSE_TEX, eq_markers=True)
+    assert "Figures/" not in out and "scale=" not in out
+
+
+def test_equation_markers_line_up_with_extracted_equations() -> None:
+    from arcvisual.ingest.latex import EQ_MARKER, _find_equations
+
+    out = strip_tex(_PROSE_TEX, eq_markers=True)
+    found = _find_equations(_PROSE_TEX)
+    assert out.count(EQ_MARKER) == len(found) == 2
+    assert [e[0] for e in found] == ["a=b", "c=d"]
+
+
+def test_a_commented_out_equation_is_not_part_of_the_paper() -> None:
+    from arcvisual.ingest.latex import _find_equations
+
+    assert all("old draft" not in e[0] for e in _find_equations(_PROSE_TEX))
+
+
+def test_a_derivation_step_must_be_math_not_a_sentence() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from arcvisual.templates.transform_chain import Params
+
+    with pytest.raises(ValidationError, match="English sentence"):
+        Params(steps=["Multi-head attention computes several functions", "x = y"])
+    # Delimiters a model adds are removed; notation inside is untouched.
+    assert Params(steps=["$a = b$", r"\[c = d\]"]).steps == ["a = b", "c = d"]
+
+
+def test_references_leave_a_readable_trace_and_braces_do_not_leak() -> None:
+    out = strip_tex(
+        r"\paragraph{Encoder:}It maps $z_{i}$, as in \cite{a} and \citep[p.~3]{b}."
+        r" See Figure~\ref{fig:x} , here."
+    )
+    assert out.startswith("Encoder: It maps $z_{i}$")  # math braces survive
+    assert "as in [cite] and [cite]." in out
+    assert "Figure [ref], here." in out
+    assert "{" not in out.replace("$z_{i}$", "")
+
+
+def test_a_footnote_with_nested_math_braces_is_removed_whole() -> None:
+    out = strip_tex(
+        r"the softmax.\footnote{Then $q \cdot k = \sum_{i=1}^{d_k} q_ik_i$ has mean $0$.}"
+        r" To counteract this, we scale by $\frac{1}{\sqrt{d_k}}$."
+    )
+    assert out == r"the softmax. To counteract this, we scale by $\frac{1}{\sqrt{d_k}}$."
+
+
+def test_reader_facing_rejections_carry_no_internal_detail() -> None:
+    exc = IngestRejection(
+        RejectCode.SOURCE_UNAVAILABLE, "wrapper around an embedded PDF; Phase 1 rung"
+    )
+    assert "Phase 1" not in exc.user_facing and "rung" not in exc.user_facing
+    assert exc.as_failure()["message"].startswith("wrapper"), (
+        "the detail is kept for developers"
+    )
+
+
+def test_author_macros_are_extracted_for_the_typesetter() -> None:
+    r"""Observed on the VAE paper: `\pT`, `\bxi`, `\LB` are private shorthand, and
+    without their definitions most of the display math rendered as error text."""
+    from arcvisual.ingest.latex import extract_macros
+
+    macros = extract_macros(
+        [
+            r"\newcommand{\pT}{p_{\boldsymbol{\theta}}}"
+            r"\newcommand\bx{\mathbf{x}}"
+            r"\newcommand{\LB}[1][x]{\mathcal{L}(#1)\xspace}"
+            r"\def\pair#1#2{\langle #1, #2 \rangle}"
+            r"\DeclareMathOperator*{\argmax}{arg\,max}"
+            r"\providecommand{\bx}{WRONG}"
+            r"\newcommand{\R}{\ensuremath{\mathbb{R}}}"
+            "\n% " + r"\newcommand{\commented}{nope}" + "\n"
+        ]
+    )
+    assert macros == {
+        r"\pT": r"p_{\boldsymbol{\theta}}",
+        r"\bx": r"\mathbf{x}",
+        r"\LB": r"\mathcal{L}(#1)",
+        r"\pair": r"\langle #1, #2 \rangle",
+        r"\argmax": r"\operatorname*{arg\,max}",
+        r"\R": r"\mathbb{R}",
+    }
+
+
+def test_ingest_carries_the_papers_macros() -> None:
+    tex = PAPER_TEX.replace(
+        r"\begin{document}", r"\newcommand{\vx}{\mathbf{x}}" + "\n" + r"\begin{document}"
+    )
+    sb = build_storyboard(metadata(), paper_tarball(tex))
+    assert sb.paper.tex_macros.get(r"\vx") == r"\mathbf{x}"
+
+
+def test_style_file_layout_macros_are_not_handed_to_the_typesetter() -> None:
+    from arcvisual.ingest.latex import extract_macros
+
+    macros = extract_macros(
+        [
+            r"\def\AND{\end{tabular}\hfil\linebreak[0]\hfil\begin{tabular}[t]{c}}"
+            r"\newcommand{\Huge}{\@setfontsize\Huge{25}{30}}"
+            r"\newcommand{\E}{\mathbb{E}}"
+        ]
+    )
+    assert macros == {r"\E": r"\mathbb{E}"}
+
+
+def test_equation_numbering_macros_expand_to_nothing() -> None:
+    from arcvisual.ingest.latex import extract_macros
+
+    numbering = r"\newcommand{\eqnr}{\addtocounter{equation}{1}\tag{\theequation}}"
+    assert extract_macros([numbering]) == {r"\eqnr": "{}"}

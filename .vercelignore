@@ -28,3 +28,8 @@ media/
 tests/
 eval/
 .github/
+
+# Editor/agent tooling the Vercel CLI may add; not part of the app.
+.agents/
+.claude/
+api/__pycache__/

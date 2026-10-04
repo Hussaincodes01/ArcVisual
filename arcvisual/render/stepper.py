@@ -21,9 +21,11 @@ invocations, which buys three properties at once:
   appears in it the moment its step records it — the plan's "readable at 90s,
   animations stream in" without a socket.
 
-The step budget leaves room before the platform's hard limit, and a scene is never
-*started* inside the final reserve: one scene is a codegen call plus its repair
-ladder, and it must finish inside the invocation that began it.
+The step budget bounds when a scene may *start*; a running scene may begin repair
+attempts for a short grace period after it, and none later, so the last model call
+still finishes inside the platform's hard limit. A scene stopped by a rate limit or
+by that clock — before anything completed — is not degraded: it goes back in the
+queue for the next step.
 """
 
 from __future__ import annotations
@@ -41,8 +43,13 @@ from arcvisual.storyboard import Scene, SceneState, Stage, Storyboard, assert_mo
 
 log = logging.getLogger(__name__)
 
-#: Seconds before the step deadline after which no new scene is started.
-SCENE_RESERVE_S = 75
+#: The step budget bounds when work may START. A scene already running may begin
+#: further repair attempts for this much longer — and no later, because each attempt
+#: is a model call that must finish inside the platform's hard limit.
+ATTEMPT_GRACE_S = 80
+#: A scene stopped by a rate limit or timeout before any attempt completed is put
+#: back for a later step this many times before it is allowed to degrade.
+MAX_SCENE_RETRIES = 3
 #: Analyze has no repair ladder above it — a failure loses the whole paper — so a
 #: transient error (a timeout, a rate limit) gets this many steps before the job is
 #: failed. Three, because each step is itself a fresh set of provider retries.
@@ -83,7 +90,7 @@ def advance(
     with sf() as session:
         # The lease outlives the budget by enough to cover a scene started at the
         # last moment, and expires on its own if the platform kills this invocation.
-        token = repo.acquire_lease(session, job_id, ttl_s=budget + SCENE_RESERVE_S + 30)
+        token = repo.acquire_lease(session, job_id, ttl_s=budget + ATTEMPT_GRACE_S + 60)
     report = StepReport(job_id=str(job_id))
     if token is None:
         report.busy = True
@@ -104,7 +111,7 @@ def advance(
                 report.steps.append("ingest")
             elif state == "analyzing":
                 report.steps.append("analyze")
-                if not _step_analyze(sf, job_id, provider):
+                if not _step_analyze(sf, job_id, provider, deadline=deadline):
                     # A failed attempt ends this step. Retrying inside the same call
                     # spends the whole attempt budget in milliseconds on the same
                     # transient condition; the next call comes seconds later.
@@ -215,7 +222,7 @@ def _step_ingest(sf, job_id) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _step_analyze(sf, job_id, provider) -> bool:
+def _step_analyze(sf, job_id, provider, deadline: float | None = None) -> bool:
     """Run Analyze. True when the job moved on (to rendering, or complete)."""
     from arcvisual.analyze.single_pass import analyze
     from arcvisual.db import repo
@@ -238,7 +245,7 @@ def _step_analyze(sf, job_id, provider) -> bool:
     before = sb.model_copy(deep=True) if cfg.strict_ownership else None
     t0 = time.perf_counter()
     try:
-        sb, analysis = analyze(sb, provider=provider)
+        sb, analysis = analyze(sb, provider=provider, deadline=deadline)
     except Exception as exc:
         log.warning("analyze attempt %d failed for %s: %s", attempts, job_id, exc)
         quota = isinstance(exc, ProviderError) and "daily token quota" in str(exc)
@@ -359,9 +366,15 @@ def _step_render(
         return True
 
     lanes = max(1, min(cfg.budgets.scene_concurrency, len(queue)))
+    attempt_deadline = deadline + ATTEMPT_GRACE_S
+    with sf() as session:
+        retries: dict[str, int] = dict(
+            (session.get(Job, job_id).stage_progress or {}).get("scene_retries") or {}
+        )
+    requeued: list[Any] = []
 
     def can_start() -> bool:
-        return time.monotonic() < deadline - SCENE_RESERVE_S
+        return time.monotonic() < deadline
 
     with ThreadPoolExecutor(max_workers=lanes, thread_name_prefix="arc-step") as pool:
         running: dict[Future, Any] = {}
@@ -385,6 +398,7 @@ def _step_render(
                         provider=provider,
                         renderer=renderer,
                         run_gate2=run_gate2,
+                        deadline=attempt_deadline,
                     )
                 ] = o
 
@@ -398,16 +412,28 @@ def _step_render(
                 except Exception as exc:
                     log.exception("scene %s raised", o.id)
                     outcome = _cancelled(sb, o, f"scene raised: {exc}")
+                if outcome.transient and retries.get(o.id, 0) < MAX_SCENE_RETRIES:
+                    # Rate-limited or out of time before anything completed: say
+                    # nothing final about this scene; a later step tries again.
+                    retries[o.id] = retries.get(o.id, 0) + 1
+                    requeued.append(o)
+                    log.info("scene %s requeued (%s)", o.id, "; ".join(outcome.notes))
+                    continue
                 # Database writes stay on this thread: a Session is not thread-safe,
                 # and recording each scene as it lands is what streams it to readers.
                 _record(sf, job_id, outcome)
             start_more()
 
-    if queue:
-        # Out of time with slots left. Put the ones never started back to pending in
-        # the waiting room; the stored document already shows them as pending.
+    if requeued:
         with sf() as session:
-            for o in queue:
+            job = session.get(Job, job_id)
+            job.stage_progress = {**(job.stage_progress or {}), "scene_retries": retries}
+            session.commit()
+    if queue or requeued:
+        # Slots left. Put them back to pending in the waiting room; the stored
+        # document already shows them as pending, so the next step picks them up.
+        with sf() as session:
+            for o in [*queue, *requeued]:
                 repo.upsert_scene_progress(
                     session,
                     job_id,

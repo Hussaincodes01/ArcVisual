@@ -19,7 +19,6 @@ caching is a prefix match, so the stable half must come first.
 from __future__ import annotations
 
 import functools
-
 import logging
 import textwrap
 from typing import Literal

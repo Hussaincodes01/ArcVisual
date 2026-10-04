@@ -11,7 +11,7 @@ configured for a platform with no long-lived workers and no render containers:
 
 Both are defaults, not hard-wiring: the environment can still override them.
 
-Referenced from ``pyproject.toml`` as ``[tool.vercel] entrypoint``.
+Exposed to Vercel by ``api/index.py``; ``vercel.json`` rewrites every path there.
 """
 
 from __future__ import annotations

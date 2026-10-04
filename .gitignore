@@ -46,3 +46,5 @@ reader/.vercel
 arcvisual-media/
 eval-out/
 *.pdf
+.vercel
+.env*

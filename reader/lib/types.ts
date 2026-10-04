@@ -36,6 +36,10 @@ export interface PaperMeta {
   source_sha256: string;
   published: string | null;
   origin_url: string;
+  /** arXiv subject classes, primary first. Absent on older documents. */
+  categories?: string[];
+  /** The paper's own LaTeX macros, for the typesetter. Absent on older documents. */
+  tex_macros?: Record<string, string>;
 }
 
 export interface Equation {
@@ -123,7 +127,8 @@ export interface Artifact {
   poster_key: string;
   framestrip_key: string;
   duration_s: number;
-  quality: "draft" | "final";
+  /** "client": no video — the reader animates `spec.params` itself. */
+  quality: "draft" | "final" | "client";
   bytes: number;
 }
 
@@ -153,6 +158,24 @@ export interface PaperResponse {
   pipeline_version: string;
   storyboard: Storyboard;
   media_base: string;
+  /** The job that produced (or is still producing) this document. */
+  job_id?: string;
+  state?: string;
+  render_mode?: "client" | "video";
+}
+
+/** One card in the gallery of finished explainers. */
+export interface RecentPaper {
+  slug: string;
+  title: string;
+  arxiv_id: string | null;
+  authors: string[];
+  categories: string[];
+  abstract: string;
+  visuals: number;
+  archetypes: string[];
+  sections: number;
+  completed_at: string | null;
 }
 
 export interface JobStatus {
@@ -163,11 +186,26 @@ export interface JobStatus {
   scenes: { key: string; archetype: string; state: string; ready: boolean }[];
   failure: { code: string; message: string; user_facing: string } | null;
   cost_usd: number;
+  /** The deployment advances jobs through client calls (serverless). */
+  stepped?: boolean;
+  /** Some invocation currently holds the job's lease and is doing work. */
+  working?: boolean;
+  /** Returned by `/advance` when another caller held the lease. */
+  busy?: boolean;
 }
 
 /** A scene the reader should render a slot for at all. */
 export function isShippable(scene: Scene): boolean {
   return scene.state === "passed" || scene.state === "degraded";
+}
+
+/** Drawn live in the browser from its parameters, rather than played as video. */
+export function isClientScene(scene: Scene): boolean {
+  return scene.state === "passed" && scene.artifact?.quality === "client";
+}
+
+export function isTerminalScene(scene: Scene): boolean {
+  return scene.state === "passed" || scene.state === "degraded" || scene.state === "failed";
 }
 
 /**

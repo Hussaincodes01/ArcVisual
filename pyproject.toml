@@ -15,10 +15,10 @@ license = { text = "UNLICENSED" }
 # image. Everything Manim-specific is imported lazily behind
 # arcvisual.templates.base.manim_mod().
 #
-# These are also exactly what the Vercel function installs (it reads
-# `[project].dependencies`), so everything the API needs at runtime is here and
-# nothing else is: ruff moved to `dev` — Gate 1 degrades gracefully without it, and
-# in client render mode it is never invoked.
+# These are also exactly what the Vercel function installs (requirements.txt
+# mirrors this list), so everything the API needs at runtime is here and nothing
+# else is: ruff moved to `dev` — Gate 1 degrades gracefully without it, and in
+# client render mode it is never invoked.
 dependencies = [
   "pydantic>=2.7",
   "httpx>=0.27",
@@ -58,10 +58,6 @@ all = ["arcvisual[render,api,llm,compute,dev]"]
 
 [project.scripts]
 arcvisual-eval = "eval.run:main"
-
-# The serverless control plane. See arcvisual/render/vercel_app.py.
-[tool.vercel]
-entrypoint = "arcvisual.render.vercel_app:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["arcvisual"]

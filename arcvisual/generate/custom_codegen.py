@@ -414,8 +414,9 @@ def estimate_duration(body: str) -> float:
             run_time = _kwarg_number(node, "run_time")
             # The mixin raises anything below the pacing floor, so mirror that here
             # or the estimate reads low for a body full of very short animations.
-            total += max(run_time if run_time is not None else _DEFAULT_RUN_TIME_S,
-                         MIN_BEAT_S)
+            total += max(
+                run_time if run_time is not None else _DEFAULT_RUN_TIME_S, MIN_BEAT_S
+            )
         elif target.attr == "hold":
             seconds = _positional_number(node, 0)
             if seconds is None:
@@ -532,8 +533,10 @@ def generate_custom(
     # content hash: two scenes with identical captions but different drawings must
     # not share a cached video.
     spec = spec.model_copy(
-        update={"params": {**spec.params, "body_sha": _body_sha(out.body)},
-                "duration_s": duration}
+        update={
+            "params": {**spec.params, "body_sha": _body_sha(out.body)},
+            "duration_s": duration,
+        }
     )
     source = render_custom_module(spec, out)
     scene = Scene(spec=spec, state=SceneState.VALIDATING, attempts=attempt)

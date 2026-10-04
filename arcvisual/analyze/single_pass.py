@@ -89,6 +89,7 @@ def analyze(
     *,
     provider: Provider | None = None,
     client: object | None = None,
+    deadline: float | None = None,
 ) -> tuple[Storyboard, AnalyzeReport]:
     """Annotate a Storyboard with concepts, difficulty and visual opportunities.
 
@@ -110,9 +111,132 @@ def analyze(
             provider="heuristic",
         )
     else:
-        raw, report = _call_provider(sb, provider)
+        caps = provider.capabilities()
+        groups = plan_passes(sb, caps.prompt_char_budget, caps.analysis_passes)
+        if len(groups) > 1:
+            raw, report = _call_in_passes(sb, provider, groups, deadline=deadline)
+        else:
+            raw, report = _call_provider(sb, provider)
 
     return _apply(sb, raw, report)
+
+
+# --------------------------------------------------------------------------- #
+# Several passes over a long paper
+# --------------------------------------------------------------------------- #
+
+#: Headings that rarely carry a visualisable idea. Read last, not never.
+_LOW_VALUE = re.compile(
+    r"related|prior work|background|acknowledg|reference|appendix|conclusion|"
+    r"discussion|future|limitation|broader|ethic|reproducib",
+    re.I,
+)
+_HIGH_VALUE = re.compile(
+    r"method|model|architecture|approach|algorithm|framework|experiment|result|"
+    r"analysis|training|objective|loss|derivation|theorem|attention|network|bound",
+    re.I,
+)
+
+
+def plan_passes(sb: Storyboard, char_budget: int | None, passes: int) -> list[list[str]]:
+    """Group a paper's sections into at most `passes` ANALYZE calls.
+
+    Only when the body overflows the budget; otherwise one call sees everything.
+    Sections are ranked by how likely they are to hold an idea worth animating —
+    equations and method-like headings first, related work and acknowledgements
+    last — and packed whole into groups of roughly `char_budget` characters. Each
+    group keeps document order, so the model reads it as the paper flows.
+    """
+    sections = [s for s in sb.sections if len(s.prose_md) >= MIN_ANALYSABLE_PROSE]
+    if not char_budget or passes <= 1 or sum(len(s.raw) for s in sections) <= char_budget:
+        return [[s.id for s in sb.sections]]
+
+    def score(s: Section) -> float:
+        heading = " ".join(s.heading_path)
+        value = 2.0 * bool(s.equation_ids) + 1.0 * bool(s.figure_ids)
+        value += 1.5 * bool(_HIGH_VALUE.search(heading))
+        value -= 2.5 * bool(_LOW_VALUE.search(heading))
+        return value
+
+    order = {s.id: i for i, s in enumerate(sb.sections)}
+    ranked = sorted(sections, key=lambda s: (-score(s), order[s.id]))
+    groups: list[list[Section]] = []
+    sizes: list[int] = []
+    for s in ranked:
+        size = len(s.raw)
+        for i in range(len(groups)):
+            if sizes[i] + size <= char_budget:
+                groups[i].append(s)
+                sizes[i] += size
+                break
+        else:
+            if len(groups) < passes:
+                groups.append([s])
+                sizes.append(size)  # an oversized section is trimmed by build_prompt
+    return [[s.id for s in sorted(g, key=lambda s: order[s.id])] for g in groups]
+
+
+def _subset(sb: Storyboard, section_ids: list[str]) -> Storyboard:
+    keep = set(section_ids)
+    sections = [s.model_copy(deep=True) for s in sb.sections if s.id in keep]
+    eq_ids = {e for s in sections for e in s.equation_ids}
+    fig_ids = {f for s in sections for f in s.figure_ids}
+    return Storyboard(
+        paper=sb.paper,
+        sections=sections,
+        equations=[e for e in sb.equations if e.id in eq_ids],
+        figures=[f for f in sb.figures if f.id in fig_ids],
+    )
+
+
+def _call_in_passes(
+    sb: Storyboard,
+    provider: Provider,
+    groups: list[list[str]],
+    *,
+    deadline: float | None = None,
+) -> tuple[AnalysisOut, AnalyzeReport]:
+    """One ANALYZE call per section group, merged before grounding.
+
+    Grounding runs once, over the merged answer and the WHOLE storyboard, so a
+    quote is checked against exactly the text that was sent — section ids are the
+    same in every subset. A pass that fails is skipped when another succeeded: a
+    paper explained from two thirds of its sections beats no explanation.
+    """
+    outs: list[AnalysisOut] = []
+    report = AnalyzeReport()
+    errors: list[str] = []
+    import time
+
+    for k, group in enumerate(groups):
+        if outs and deadline is not None and time.monotonic() >= deadline:
+            # Out of time with something in hand: ship it rather than risk the
+            # platform killing the call and losing every pass.
+            report.notes.append(f"stopped after pass {k}: out of time")
+            break
+        p = provider.rotated(k) if hasattr(provider, "rotated") else provider
+        try:
+            out, rep = _call_provider(_subset(sb, group), p)
+        except Exception as exc:
+            log.warning("analyze pass %d/%d failed: %s", k + 1, len(groups), exc)
+            errors.append(str(exc))
+            continue
+        outs.append(out)
+        report.cost_usd = round(report.cost_usd + rep.cost_usd, 6)
+        report.cost_attributed = report.cost_attributed and rep.cost_attributed
+        report.provider, report.model = rep.provider, rep.model
+    if not outs:
+        raise RuntimeError("every analyze pass failed: " + " | ".join(errors[:3]))
+    report.notes.append(
+        f"analyzed in {len(outs)} of {len(groups)} passes over section groups"
+    )
+    merged = AnalysisOut.model_construct(
+        concepts=[c for o in outs for c in o.concepts],
+        opportunities=[op for o in outs for op in o.opportunities],
+        section_difficulty=[d for o in outs for d in o.section_difficulty],
+        reading_note=" ".join(o.reading_note for o in outs if o.reading_note)[:600],
+    )
+    return merged, report
 
 
 # --------------------------------------------------------------------------- #

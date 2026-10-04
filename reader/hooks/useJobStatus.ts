@@ -1,46 +1,41 @@
 "use client";
 
 /**
- * Polls `GET /api/jobs/:id` and derives everything the UI needs from it.
+ * Follows a job, and on a serverless deployment also *drives* it.
  *
- * Polling rather than SSE, deliberately (see `arcvisual/render/api.py`): one JSONB read
- * per tick, survives every proxy between Vercel and Modal, nothing to operate. The
- * backoff below is the whole reason it stays cheap — 3s while a reader is watching
- * closely, easing to 10s once the wait is clearly a long one.
+ * Two loops, deliberately separate:
  *
- * Two failure modes handled explicitly, because both are common in practice:
+ * - **The status poll** reads `GET /api/jobs/:id` every few seconds. It is what the
+ *   reader sees move: stage changes, scenes landing one by one.
+ * - **The driver** calls `POST /api/jobs/:id/advance` back to back while the job is
+ *   unfinished. Each call does one bounded step of work (up to a few minutes) and
+ *   returns. A job only moves while someone drives it, so this is what makes the
+ *   waiting room more than a spinner. Several open tabs are safe: the API leases
+ *   the job, so all but one caller come straight back with `busy`.
  *
- * - **A dropped poll is not an error.** Transient network blips are ignored and the
- *   next tick recovers. Only a run of consecutive failures surfaces to the reader.
- * - **The interval is cleared on unmount and on terminal state.** A forgotten
- *   `setTimeout` chain polling a finished job forever is the classic version of this
- *   bug, and it is invisible until someone reads the access log.
+ * Failures: a single dropped request is noise. Only a run of consecutive failures
+ * surfaces, and the driver backs off rather than hammering a struggling API.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchJob } from "../lib/api";
+import { advanceJob, fetchJob } from "../lib/api";
 import type { JobStatus } from "../lib/types";
 
 export const STAGES = [
-  { key: "queued", label: "Queued", detail: "Waiting for a worker" },
-  { key: "ingesting", label: "Reading the paper", detail: "Sections, equations, figures" },
-  { key: "analyzing", label: "Working out what to explain", detail: "Concepts and triage" },
-  { key: "rendering", label: "Animating", detail: "One scene at a time" },
-  { key: "complete", label: "Done", detail: "Article ready" },
+  { key: "queued", label: "In line", detail: "Starting up" },
+  { key: "ingesting", label: "Reading the paper", detail: "Fetching the LaTeX source from arXiv" },
+  { key: "analyzing", label: "Finding the hard ideas", detail: "Concepts, prerequisites and what deserves a visual" },
+  { key: "rendering", label: "Building the visuals", detail: "Filling and checking each animation" },
+  { key: "complete", label: "Ready to read", detail: "Your explainer is done" },
 ] as const;
 
-export type StageKey = (typeof STAGES)[number]["key"];
-
-const FAST_MS = 3_000;
-const SLOW_MS = 10_000;
-const EASE_AFTER_MS = 120_000;
-//: Only tell the reader something is wrong after this many consecutive failures; a
-//: single dropped request is noise, not news.
+const POLL_MS = 3_000;
+const SLOW_POLL_MS = 8_000;
+const SLOW_AFTER_MS = 150_000;
 const FAILURES_BEFORE_SURFACING = 3;
 
 export interface JobView {
   status: JobStatus | null;
-  /** 0–1 across the whole pipeline, blending stage index with scene completion. */
   progress: number;
   stageIndex: number;
   isTerminal: boolean;
@@ -52,74 +47,108 @@ export interface JobView {
   refresh: () => void;
 }
 
-export function useJobStatus(jobId: string | null | undefined): JobView {
+const terminal = (s: JobStatus | null) => s?.state === "complete" || s?.state === "failed";
+
+export function useJobStatus(jobId: string | null | undefined, { drive = true } = {}): JobView {
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [elapsedMs, setElapsed] = useState(0);
+  const [nonce, setNonce] = useState(0);
+  const startedAt = useRef(Date.now());
+  const latest = useRef<JobStatus | null>(null);
 
-  const startedAt = useRef<number>(Date.now());
-  const timer = useRef<number | null>(null);
-  const failures = useRef(0);
-  const stopped = useRef(false);
-
-  const clear = useCallback(() => {
-    if (timer.current !== null) {
-      window.clearTimeout(timer.current);
-      timer.current = null;
-    }
+  const accept = useCallback((next: JobStatus) => {
+    latest.current = next;
+    setStatus(next);
+    setError(null);
   }, []);
 
-  const poll = useCallback(async () => {
-    if (!jobId || stopped.current) return;
-    try {
-      const next = await fetchJob(jobId);
-      failures.current = 0;
-      setError(null);
-      setStatus(next);
-      if (next.state === "complete" || next.state === "failed") {
-        stopped.current = true;
-        clear();
-        return;
-      }
-    } catch (err) {
-      failures.current += 1;
-      if (failures.current >= FAILURES_BEFORE_SURFACING) {
-        setError(
-          err instanceof Error ? err.message : "Lost contact with the pipeline."
-        );
-      }
-    }
-    const age = Date.now() - startedAt.current;
-    timer.current = window.setTimeout(poll, age > EASE_AFTER_MS ? SLOW_MS : FAST_MS);
-  }, [jobId, clear]);
-
+  // -- status poll -------------------------------------------------------- //
   useEffect(() => {
     if (!jobId) return;
-    stopped.current = false;
-    failures.current = 0;
+    let stopped = false;
+    let timer: number | undefined;
+    let failures = 0;
     startedAt.current = Date.now();
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const next = await fetchJob(jobId);
+        if (stopped) return;
+        failures = 0;
+        accept(next);
+        if (terminal(next)) return;
+      } catch (err) {
+        failures += 1;
+        if (failures >= FAILURES_BEFORE_SURFACING) {
+          setError(err instanceof Error ? err.message : "Lost contact with the server.");
+        }
+      }
+      const age = Date.now() - startedAt.current;
+      timer = window.setTimeout(poll, age > SLOW_AFTER_MS ? SLOW_POLL_MS : POLL_MS);
+    };
     void poll();
     return () => {
-      stopped.current = true;
-      clear();
+      stopped = true;
+      window.clearTimeout(timer);
     };
-  }, [jobId, poll, clear]);
+  }, [jobId, accept, nonce]);
 
-  // A separate, cheap ticker so the elapsed readout moves between polls. Without it
-  // the page looks frozen for ten seconds at a stretch.
+  // -- driver ------------------------------------------------------------- //
+  useEffect(() => {
+    if (!jobId || !drive) return;
+    const abort = new AbortController();
+    let failures = 0;
+
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const id = window.setTimeout(resolve, ms);
+        abort.signal.addEventListener("abort", () => {
+          window.clearTimeout(id);
+          resolve();
+        });
+      });
+
+    void (async () => {
+      // Give the first status poll a moment, so a deployment that does not step
+      // (stepped === false) is detected before any advance call is made.
+      await sleep(400);
+      while (!abort.signal.aborted) {
+        const current = latest.current;
+        if (terminal(current)) return;
+        if (current && current.stepped === false) return;
+        try {
+          const next = await advanceJob(jobId, abort.signal);
+          if (abort.signal.aborted) return;
+          failures = 0;
+          accept(next);
+          if (terminal(next)) return;
+          // Busy means another caller holds the job; watch rather than queue up.
+          await sleep(next.busy ? 5_000 : 600);
+        } catch (err) {
+          if (abort.signal.aborted) return;
+          failures += 1;
+          if (failures >= FAILURES_BEFORE_SURFACING) {
+            setError(err instanceof Error ? err.message : "The server stopped responding.");
+          }
+          await sleep(Math.min(30_000, 3_000 * 2 ** Math.min(failures, 4)));
+        }
+      }
+    })();
+    return () => abort.abort();
+  }, [jobId, drive, accept, nonce]);
+
+  // A cheap ticker so the elapsed time moves between polls.
   useEffect(() => {
     if (!jobId) return;
     const id = window.setInterval(() => {
-      if (!stopped.current) setElapsed(Date.now() - startedAt.current);
+      if (!terminal(latest.current)) setElapsed(Date.now() - startedAt.current);
     }, 1_000);
     return () => window.clearInterval(id);
   }, [jobId]);
 
-  const refresh = useCallback(() => {
-    stopped.current = false;
-    clear();
-    void poll();
-  }, [poll, clear]);
+  const refresh = useCallback(() => setNonce((n) => n + 1), []);
 
   return { ...derive(status), error, elapsedMs, refresh, status };
 }
@@ -127,34 +156,22 @@ export function useJobStatus(jobId: string | null | undefined): JobView {
 function derive(status: JobStatus | null) {
   const stageIndex = Math.max(
     0,
-    STAGES.findIndex((s) => s.key === (status?.state ?? "queued"))
+    STAGES.findIndex((s) => s.key === (status?.state ?? "queued")),
   );
   const scenes = status?.scenes ?? [];
   const scenesTotal = scenes.length;
-  const scenesDone = scenes.filter((s) => s.state !== "pending" && s.state !== "generating" && s.state !== "validating").length;
-
+  const scenesDone = scenes.filter((s) => ["passed", "degraded", "failed"].includes(s.state)).length;
   const failed = status?.state === "failed";
   const isTerminal = failed || status?.state === "complete";
 
-  // Rendering dominates the wall clock, so it owns most of the bar. Anything else
-  // would sit at 90% for ten minutes, which reads as broken.
+  // Visuals dominate the wall clock, so they own most of the bar; anything else
+  // would park at 90% for minutes, which reads as broken.
   let progress: number;
-  if (isTerminal) {
-    progress = 1;
-  } else if (status?.state === "rendering" && scenesTotal > 0) {
-    progress = 0.35 + 0.6 * (scenesDone / scenesTotal);
-  } else {
-    progress = [0.02, 0.12, 0.3, 0.35, 1][stageIndex] ?? 0.02;
-  }
+  if (isTerminal) progress = 1;
+  else if (status?.state === "rendering" && scenesTotal > 0) progress = 0.4 + 0.58 * (scenesDone / scenesTotal);
+  else progress = [0.04, 0.14, 0.3, 0.4, 1][stageIndex] ?? 0.04;
 
-  return {
-    progress: Math.min(1, progress),
-    stageIndex,
-    isTerminal,
-    failed,
-    scenesDone,
-    scenesTotal,
-  };
+  return { progress: Math.min(1, progress), stageIndex, isTerminal, failed, scenesDone, scenesTotal };
 }
 
 export function formatElapsed(ms: number): string {

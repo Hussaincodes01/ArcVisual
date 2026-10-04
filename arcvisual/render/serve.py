@@ -40,8 +40,16 @@ def build_local_app(
     database_url: str | None = None,
     run_gate2: bool = True,
     max_workers: int = 2,
+    stepped: bool = False,
 ):
-    """The FastAPI app, wired to a local database and a thread orchestrator."""
+    """The FastAPI app, wired to a local database and a thread orchestrator.
+
+    ``stepped`` mirrors the Vercel deployment instead: no orchestrator, jobs driven
+    by ``POST /api/jobs/{id}/advance``, scenes rendered in the browser.
+    """
+    if stepped:
+        os.environ["ARCVISUAL_RENDER_MODE"] = "client"
+        run_gate2 = False
     from sqlalchemy.orm import sessionmaker
 
     if database_url is None:
@@ -80,6 +88,11 @@ def build_local_app(
     from arcvisual.render.api import build_api
     from arcvisual.render.orchestrator import ThreadOrchestrator
 
+    if stepped:
+        app = build_api(None, stepped=True)
+        app.state.session_factory = Session
+        return app
+
     orchestrator = ThreadOrchestrator(
         max_workers=max_workers,
         session_factory=Session,
@@ -107,6 +120,11 @@ def main(argv: list[str] | None = None) -> int:
         help="skip the draft render (no Manim needed); Gate 1 still runs",
     )
     parser.add_argument("--workers", type=int, default=2, help="concurrent jobs")
+    parser.add_argument(
+        "--stepped",
+        action="store_true",
+        help="mirror the serverless deployment: advance-driven jobs, browser-rendered scenes",
+    )
     args = parser.parse_args(argv)
 
     # Before the banner: on a default Windows console stdout is cp1252, and the
@@ -130,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     # The local renderer is a subprocess, not a sandbox: it cannot deny network
     # access. Fine on a laptop, never in production, so say so rather than let it
     # pass unnoticed.
-    if not args.no_gate2:
+    if not args.no_gate2 and not args.stepped:
         os.environ.setdefault("ARCVISUAL_RENDERER", "local")
         from arcvisual.gates.g2_runtime import ensure_ffmpeg
 
@@ -140,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         database_url=args.database_url,
         run_gate2=not args.no_gate2,
         max_workers=args.workers,
+        stepped=args.stepped,
     )
 
     from arcvisual.config import settings
@@ -154,7 +173,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"  database   {db}")
     print(
-        f"  gate 2     {'local renderer (NOT a sandbox)' if not args.no_gate2 else 'skipped'}"
+        "  gate 2     "
+        + (
+            "skipped (stepped: scenes render in the browser)"
+            if args.stepped
+            else ("local renderer (NOT a sandbox)" if not args.no_gate2 else "skipped")
+        )
     )
     print(f"  rate limit {settings().rate_limit_per_hour}/hour per client")
     print(

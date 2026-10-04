@@ -42,6 +42,52 @@ def _cap_steps(value: object) -> object:
     return [*value[: MAX_STEPS - 1], value[-1]]
 
 
+_DELIMITERS = (("$$", "$$"), ("\\[", "\\]"), ("\\(", "\\)"), ("$", "$"))
+_MATH_SIGNS = set("=^_\\+<>|/*{}()[]∑∫√≤≥≈∝·×")  # noqa: RUF001
+
+
+def _strip_delimiters(value: object) -> object:
+    """Drop math delimiters a model wraps around a step.
+
+    `steps` are typeset in math mode already. A step that arrives as ``$x^2$`` puts
+    a literal ``$`` inside MathTex — a LaTeX error at render time — and in the
+    browser shows the dollar signs. Removing them is a coercion, not a judgement:
+    the notation inside is untouched.
+    """
+    if not isinstance(value, list):
+        return value
+    out = []
+    for step in value:
+        if isinstance(step, str):
+            s = step.strip()
+            for left, right in _DELIMITERS:
+                if (
+                    s.startswith(left)
+                    and s.endswith(right)
+                    and len(s) > len(left) + len(right)
+                ):
+                    # Only a step that HAD delimiters is touched; anything else
+                    # stays byte-for-byte, because notation is copied verbatim.
+                    step = s[len(left) : -len(right)].strip()
+                    break
+        out.append(step)
+    return out
+
+
+def _looks_like_prose(step: str) -> bool:
+    """A sentence where an equation belongs.
+
+    Observed on a real run: every step of a "derivation" came back as an English
+    sentence. Typeset in math mode that renders as one long run of italic letters —
+    the scene passes every mechanical check and teaches nothing. No math sign at all
+    plus several real words is the signature.
+    """
+    if any(ch in _MATH_SIGNS for ch in step):
+        return False
+    words = [w for w in step.split() if len(w) >= 3 and w.isalpha()]
+    return len(words) >= 4
+
+
 TEMPLATE_ID = "transform_chain"
 ARCHETYPE = Archetype.TRANSFORM_CHAIN
 
@@ -68,7 +114,24 @@ class Params(TemplateParams):
             "`steps`; trailing steps simply get no accent."
         ),
     )
-    _trim_steps = field_validator("steps", mode="before")(_cap_steps)
+    _trim_steps = field_validator("steps", mode="before")(
+        lambda v: _cap_steps(_strip_delimiters(v))
+    )
+
+    @field_validator("steps")
+    @classmethod
+    def _steps_are_equations(cls, steps: list[str]) -> list[str]:
+        # STRUCTURAL, so it rejects: a sentence cannot be coerced into the equation
+        # it describes. The message is written for the repair prompt.
+        for i, step in enumerate(steps):
+            if _looks_like_prose(step):
+                raise ValueError(
+                    f"step {i + 1} is an English sentence, not an equation: "
+                    f"{step[:60]!r}. Every step must be LaTeX math copied from the "
+                    "paper, e.g. \\mathrm{softmax}(QK^T / \\sqrt{d_k})V. Put the "
+                    "explanation in the captions instead."
+                )
+        return steps
 
     title: str | None = Field(
         default=None,

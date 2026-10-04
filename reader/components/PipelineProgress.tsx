@@ -1,41 +1,35 @@
 "use client";
 
 /**
- * The waiting room. What a reader sees between pasting a URL and having an article.
+ * What a reader sees between pasting a link and reading the explainer.
  *
- * The plan is blunt about this: ArcVisual is asynchronous by design, rendering a dozen
- * Manim scenes takes minutes, and "pretending otherwise produces a bad product". So
- * this view owns the wait honestly rather than hiding it:
- *
- * - the five stages are named, so the reader knows *what* is happening, not just that
- *   something is;
- * - per-scene state is shown as it lands, because twelve things finishing one at a time
- *   is far more reassuring than one bar creeping;
- * - the expected timings from the plan (10s / 90s / 2–12m) are stated up front, so a
- *   four-minute wait is a met expectation instead of a worry;
- * - a failure names the reason in the reader's terms and links to the paper.
- *
- * It is a client component because it polls. The article itself is server-rendered, so
- * the prose never waits on JavaScript.
+ * The wait is owned honestly rather than hidden: the stages are named, each visual
+ * is listed as it lands, and the article opens for reading as soon as the paper has
+ * been analysed — the prose does not need to wait for the visuals.
  */
 
+import { formatElapsed, STAGES, type JobView } from "../hooks/useJobStatus";
 import type { JobStatus } from "../lib/types";
 import ArcLoader, { ArcDots } from "./ArcLoader";
-import { formatElapsed, STAGES, type JobView } from "../hooks/useJobStatus";
 
 interface Props extends JobView {
   title?: string;
   slug?: string | null;
-  originUrl?: string;
 }
 
-const SCENE_STATE_LABEL: Record<string, string> = {
-  pending: "queued",
-  generating: "writing parameters",
-  validating: "rendering",
-  passed: "ready",
-  degraded: "prose instead",
-  failed: "prose only",
+const SCENE_LABEL: Record<string, string> = {
+  pending: "Queued",
+  generating: "Drawing",
+  validating: "Checking",
+  passed: "Ready",
+  degraded: "In the text",
+  failed: "In the text",
+};
+
+const KIND: Record<string, string> = {
+  transform_chain: "Derivation",
+  plot_reveal: "Result",
+  architecture_flow: "System",
 };
 
 export default function PipelineProgress({
@@ -51,254 +45,161 @@ export default function PipelineProgress({
   refresh,
   title,
   slug,
-  originUrl,
 }: Props) {
-  if (failed) {
-    return <Failure status={status} originUrl={originUrl} />;
-  }
+  if (failed) return <Failure status={status} />;
+  const readable = Boolean(slug) && (status?.state === "rendering" || status?.state === "complete");
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-16">
-      <div className="flex items-start justify-between gap-6">
-        <div>
-          <p className="text-xs uppercase tracking-widest text-muted">Working on it</p>
-          <h1 className="mt-2 text-2xl font-semibold text-fg">
-            {title ?? "Reading your paper"}
-          </h1>
+    <div className="mx-auto max-w-3xl px-4 pb-24 pt-6 sm:px-6">
+      <div className="rounded-[2rem] border-[1.5px] border-ink bg-paper p-6 sm:p-10">
+        <div className="flex items-start justify-between gap-6">
+          <div className="min-w-0">
+            <span className="pill bg-mustard text-xs">{isTerminal ? "Done" : "Working on it"}</span>
+            <h1 className="mt-4 text-[clamp(1.6rem,3.6vw,2.4rem)] font-semibold leading-tight tracking-tight">
+              {title ?? "Reading your paper"}
+            </h1>
+          </div>
+          <ArcLoader size={56} progress={isTerminal ? 1 : progress} />
         </div>
-        <ArcLoader size={52} progress={isTerminal ? 1 : progress} />
-      </div>
 
-      {/* A single determinate bar, weighted so rendering owns most of it. */}
-      <div
-        className="mt-8 h-1 w-full overflow-hidden rounded-full bg-surface"
-        role="progressbar"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(progress * 100)}
-      >
         <div
-          className="h-full rounded-full bg-accent transition-[width] duration-700 ease-out"
-          style={{ width: `${Math.max(2, progress * 100)}%` }}
-        />
-      </div>
-
-      <p className="mt-3 flex items-center gap-2 text-sm text-muted">
-        <span className="tabular-nums">{formatElapsed(elapsedMs)}</span>
-        <span aria-hidden="true">·</span>
-        <span>
-          {scenesTotal > 0
-            ? `${scenesDone} of ${scenesTotal} animations done`
-            : "no animations queued yet"}
-        </span>
-        {!isTerminal ? <ArcDots className="ml-1" /> : null}
-      </p>
-
-      <StageList stageIndex={stageIndex} isTerminal={isTerminal} />
-
-      {scenesTotal > 0 ? (
-        <SceneList scenes={status?.scenes ?? []} />
-      ) : (
-        <Expectations />
-      )}
-
-      {error ? (
-        <div className="mt-8 rounded-md border border-warn/40 bg-warn/10 p-3 text-sm text-warn">
-          <p>{error}</p>
-          <button
-            type="button"
-            onClick={refresh}
-            className="mt-2 underline decoration-dotted"
-          >
-            Try again now
-          </button>
-        </div>
-      ) : null}
-
-      {isTerminal && slug ? (
-        <a
-          href={`/p/${slug}`}
-          className="mt-10 inline-block rounded-md border border-accent px-4 py-2 text-accent"
+          className="mt-8 h-3 w-full overflow-hidden rounded-full border-[1.5px] border-ink bg-wash"
+          role="progressbar"
+          aria-label="Progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(progress * 100)}
         >
-          Read the article →
-        </a>
-      ) : null}
+          <div className="h-full rounded-full bg-coral transition-[width] duration-700 ease-out" style={{ width: `${Math.max(3, progress * 100)}%` }} />
+        </div>
+        <p className="mt-3 flex flex-wrap items-center gap-x-3 text-sm text-ink-soft">
+          <span className="tabular-nums">{formatElapsed(elapsedMs)} so far</span>
+          <span>{scenesTotal > 0 ? `${scenesDone} of ${scenesTotal} visuals done` : "No visuals planned yet"}</span>
+          {!isTerminal ? <ArcDots /> : null}
+        </p>
 
-      <p className="mt-12 border-t border-border pt-6 text-sm text-muted">
-        You can close this tab. The article is permalinked and will be waiting
-        {slug ? (
-          <>
-            {" at "}
-            <code className="text-fg">/p/{slug}</code>
-          </>
-        ) : null}
-        .
-      </p>
-    </div>
-  );
-}
-
-// --------------------------------------------------------------------------- //
-
-function StageList({
-  stageIndex,
-  isTerminal,
-}: {
-  stageIndex: number;
-  isTerminal: boolean;
-}) {
-  return (
-    <ol className="mt-10 space-y-1">
-      {STAGES.map((stage, i) => {
-        const done = isTerminal || i < stageIndex;
-        const active = !isTerminal && i === stageIndex;
-        return (
-          <li
-            key={stage.key}
-            className={`flex items-start gap-3 rounded-md px-3 py-2 transition-colors ${
-              active ? "bg-surface" : ""
-            }`}
-          >
-            <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center">
-              {done ? (
-                <svg viewBox="0 0 20 20" className="size-4 text-good" aria-hidden="true">
-                  <path
-                    d="M4 10.5l4 4 8-9"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              ) : active ? (
-                <span className="arc-pulse size-2 rounded-full bg-accent" />
-              ) : (
-                <span className="size-2 rounded-full border border-border" />
-              )}
-            </span>
-            <span className="min-w-0">
-              <span
-                className={`block text-sm ${
-                  active ? "text-fg" : done ? "text-muted" : "text-muted/60"
+        <ol className="mt-8 space-y-2">
+          {STAGES.map((stage, i) => {
+            const done = isTerminal || i < stageIndex;
+            const active = !isTerminal && i === stageIndex;
+            return (
+              <li
+                key={stage.key}
+                className={`flex items-center gap-4 rounded-2xl border-[1.5px] px-4 py-3 ${
+                  active ? "border-ink bg-lavender-soft" : "border-transparent"
                 }`}
               >
-                {stage.label}
-              </span>
-              {active ? (
-                <span className="block text-xs text-muted">{stage.detail}</span>
-              ) : null}
-            </span>
-          </li>
-        );
-      })}
-    </ol>
+                <span
+                  className={`flex size-8 shrink-0 items-center justify-center rounded-full border-[1.5px] border-ink text-sm font-semibold ${
+                    done ? "bg-ink text-paper" : active ? "bg-mustard" : "bg-paper text-muted"
+                  }`}
+                  aria-hidden="true"
+                >
+                  {done ? "✓" : i + 1}
+                </span>
+                <span className="min-w-0">
+                  <span className={`block ${active ? "font-semibold" : done ? "" : "text-muted"}`}>{stage.label}</span>
+                  {active ? <span className="block text-sm text-ink-soft">{stage.detail}</span> : null}
+                </span>
+              </li>
+            );
+          })}
+        </ol>
+
+        {readable ? (
+          <div className="mt-8 flex flex-wrap items-center gap-4 rounded-2xl border-[1.5px] border-ink bg-mustard-soft p-4">
+            <p className="flex-1 text-sm">
+              {isTerminal ? "Your explainer is ready." : "The text is ready. Visuals keep filling in while you read."}
+            </p>
+            <a href={`/p/${slug}`} className="btn btn-ink">
+              {isTerminal ? "Read the explainer" : "Start reading now"}
+            </a>
+          </div>
+        ) : null}
+
+        {error ? (
+          <div className="mt-6 rounded-2xl border-[1.5px] border-ink bg-wash p-4 text-sm">
+            <p>{error}</p>
+            <button type="button" onClick={refresh} className="mt-2 font-medium underline decoration-coral decoration-2 underline-offset-4">
+              Try again now
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      {scenesTotal > 0 ? <SceneList scenes={status?.scenes ?? []} /> : <Expectations />}
+
+      <p className="mt-8 text-center text-sm text-ink-soft">
+        You can leave this page. The explainer keeps its link{slug ? <> at <code className="rounded bg-wash px-1.5 py-0.5 text-ink">/p/{slug}</code></> : null}, and
+        opening it again picks up where it left off.
+      </p>
+    </div>
   );
 }
 
 function SceneList({ scenes }: { scenes: JobStatus["scenes"] }) {
   return (
-    <div className="mt-10">
-      <h2 className="text-xs uppercase tracking-widest text-muted">Animations</h2>
-      <ul className="mt-3 divide-y divide-border rounded-md border border-border">
+    <div className="mt-6 rounded-[var(--radius-card)] border-[1.5px] border-ink bg-paper p-6">
+      <h2 className="text-lg font-semibold">Visuals</h2>
+      <ul className="mt-4 divide-y-[1.5px] divide-dashed divide-line">
         {scenes.map((scene) => {
           const ready = scene.state === "passed";
           const degraded = scene.state === "degraded" || scene.state === "failed";
           return (
-            <li
-              key={scene.key}
-              className="flex items-center gap-3 px-3 py-2 text-sm"
-            >
+            <li key={scene.key} className="flex items-center gap-3 py-3 text-sm">
               <span
-                className={`size-1.5 shrink-0 rounded-full ${
-                  ready
-                    ? "bg-good"
-                    : degraded
-                      ? "bg-warn"
-                      : "arc-pulse bg-accent"
-                }`}
+                className={`size-2.5 shrink-0 rounded-full border border-ink ${ready ? "bg-good" : degraded ? "bg-wash" : "arc-pulse bg-coral"}`}
                 aria-hidden="true"
               />
-              <span className="truncate text-muted">
-                {scene.archetype.replace(/_/g, " ")}
-              </span>
-              <span
-                className={`ml-auto shrink-0 text-xs ${
-                  ready ? "text-good" : degraded ? "text-warn" : "text-muted"
-                }`}
-              >
-                {SCENE_STATE_LABEL[scene.state] ?? scene.state}
+              <span className="text-ink">{KIND[scene.archetype] ?? scene.archetype.replace(/_/g, " ")}</span>
+              <span className={`ml-auto pill text-xs ${ready ? "bg-lavender-soft" : degraded ? "bg-wash" : "bg-paper"}`}>
+                {SCENE_LABEL[scene.state] ?? scene.state}
               </span>
             </li>
           );
         })}
       </ul>
-      <p className="mt-3 text-xs text-muted">
-        A section with good prose and no animation is a fine outcome — we would rather
-        drop a visual than ship a confusing one.
+      <p className="mt-4 text-xs text-muted">
+        A visual that does not pass its checks is left out and explained in the text instead. A confusing animation is worse
+        than none.
       </p>
     </div>
   );
 }
 
-/** The plan's own timing arc, stated before the reader starts wondering. */
 function Expectations() {
   const rows = [
-    { at: "~10s", text: "Paper identified, sections extracted" },
-    { at: "~90s", text: "Article text readable" },
-    { at: "2–12m", text: "Animations stream in" },
+    { at: "Seconds", text: "The paper is fetched and split into sections" },
+    { at: "Under a minute", text: "The hard ideas are found and the text is readable" },
+    { at: "A few minutes", text: "Visuals are drawn and checked, one by one" },
   ];
   return (
-    <div className="mt-10 rounded-md border border-border p-4">
-      <h2 className="text-xs uppercase tracking-widest text-muted">What to expect</h2>
-      <ul className="mt-3 space-y-2">
-        {rows.map((row) => (
-          <li key={row.at} className="flex gap-4 text-sm">
-            <span className="w-16 shrink-0 tabular-nums text-accent">{row.at}</span>
-            <span className="text-muted">{row.text}</span>
-          </li>
-        ))}
-      </ul>
+    <div className="mt-6 grid gap-3 sm:grid-cols-3">
+      {rows.map((row, i) => (
+        <div key={row.at} className={`rounded-[var(--radius-tile)] border-[1.5px] border-ink p-4 ${["bg-paper", "bg-lavender-soft", "bg-mustard-soft"][i]}`}>
+          <p className="font-semibold">{row.at}</p>
+          <p className="mt-1 text-sm text-ink-soft">{row.text}</p>
+        </div>
+      ))}
     </div>
   );
 }
 
-function Failure({
-  status,
-  originUrl,
-}: {
-  status: JobStatus | null;
-  originUrl?: string;
-}) {
-  // Reader-facing text comes from the pipeline's own rejection taxonomy, which is
-  // written for humans. Never show a stack trace or an error code here.
-  const message =
-    status?.failure?.user_facing ??
-    "We could not build an article from that paper.";
+function Failure({ status }: { status: JobStatus | null }) {
+  const message = status?.failure?.user_facing ?? "We could not build an explainer from that paper.";
   return (
-    <div className="mx-auto max-w-2xl px-6 py-24">
-      <h1 className="text-2xl font-semibold text-fg">We stopped early</h1>
-      <p className="mt-4 text-muted">{message}</p>
-      <div className="mt-8 flex flex-wrap gap-4 text-sm">
-        <a href="/" className="text-accent underline decoration-dotted">
-          Try another paper
-        </a>
-        {originUrl ? (
-          <a
-            href={originUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="text-accent underline decoration-dotted"
-          >
-            Read the original paper →
+    <div className="mx-auto max-w-2xl px-4 pb-24 pt-6 sm:px-6">
+      <div className="rounded-[2rem] border-[1.5px] border-ink bg-paper p-8 sm:p-10">
+        <span className="pill bg-wash text-xs">Stopped</span>
+        <h1 className="mt-4 text-3xl font-semibold tracking-tight">This paper could not be explained</h1>
+        <p className="mt-4 leading-relaxed text-ink-soft">{message}</p>
+        <div className="mt-8 flex flex-wrap gap-3">
+          <a href="/#start" className="btn btn-coral">
+            Try another paper
           </a>
-        ) : null}
+        </div>
+        {status?.failure?.code ? <p className="mt-8 text-xs text-muted">Reference: {status.failure.code}</p> : null}
       </div>
-      {status?.failure?.code ? (
-        <p className="mt-10 text-xs text-muted/70">
-          reference: <code>{status.failure.code}</code>
-        </p>
-      ) : null}
     </div>
   );
 }

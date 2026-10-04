@@ -99,9 +99,7 @@ class AnthropicProvider:
             if self._workspace_id:
                 # A default header rather than a per-call one: every request needs
                 # it, and threading it through each call site is how one gets missed.
-                kwargs["default_headers"] = {
-                    "anthropic-workspace-id": self._workspace_id
-                }
+                kwargs["default_headers"] = {"anthropic-workspace-id": self._workspace_id}
             self._client = anthropic.Anthropic(**kwargs)
         return self._client
 

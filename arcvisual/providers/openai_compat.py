@@ -179,7 +179,9 @@ class OpenAICompatProvider:
                 log.warning("%s: %s; trying the next configured model", self.name, exc)
                 self.mark_unavailable(model)
                 last = exc
-        raise last if last else ProviderError(f"{self.name} has no model for {task.value}")
+        raise (
+            last if last else ProviderError(f"{self.name} has no model for {task.value}")
+        )
 
     def candidates_for(self, task: Task) -> list[str]:
         """Models to try for `task`, best first. Single-model providers return one."""
@@ -392,10 +394,16 @@ class OpenAICompatProvider:
                 # Drain rather than refund: refunding would let every lane waiting
                 # behind this one wake immediately and fire into the same limit.
                 meter.penalise(response.headers)
-            delay = retry_after_seconds(response.headers)
-            log.info("%s rate-limited; sleeping %.1fs per its own headers", self.name, delay)
+            # Never zero: a 429 whose reset header reads "0s" or a few milliseconds
+            # otherwise spends every remaining attempt in the same instant.
+            delay = max(2.0, retry_after_seconds(response.headers))
+            log.info(
+                "%s rate-limited; sleeping %.1fs per its own headers", self.name, delay
+            )
             time.sleep(delay)
-            raise RetryableProviderError(f"{self.name} rate-limited; retrying after {delay:.0f}s")
+            raise RetryableProviderError(
+                f"{self.name} rate-limited; retrying after {delay:.0f}s"
+            )
         if response.status_code == 413:
             if meter is not None:
                 meter.settle(reserved, 0)

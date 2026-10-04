@@ -1,9 +1,20 @@
-# ArcVisual — Phase 1
+# ArcVisual
 
 **Paper in. Explained paper out.**
 
 Paste an arXiv URL; get an interactive scrollytelling article where the hard parts
-are carried by 3Blue1Brown-style Manim animations.
+are carried by animations, and every claim points back to the paper's own text.
+
+**Live:** https://arcvisual.vercel.app · API: https://arcvisual-api.vercel.app/api/health
+
+Two render modes share one pipeline:
+
+- **client** (the deployed default) — the pipeline ships each scene's validated
+  template parameters and the reader animates them in the browser. No Manim, no
+  ffmpeg, no object storage, so the whole product runs on serverless functions and a
+  free Postgres. Scenes are scrubbable, crisp at any size, and cost nothing to render.
+- **manim** — the original path: each scene rendered to MP4 by Manim (locally, or in
+  a Modal sandbox) and served from R2.
 
 Design docs: [ArcVisual-Master-Plan.md](ArcVisual-Master-Plan.md) (what and why) ·
 [ArcVisual-Architecture.md](ArcVisual-Architecture.md) (how it is wired).
@@ -40,17 +51,18 @@ fields it owns. That rule is enforced by `assert_monotonic`, not by convention.
 | Gate 3 (spatial coherence) | **working**; containment, legibility, overlap, dead air, contrast |
 | Gate 4 (VLM semantic review) | not built (Phase 2) |
 | Repair ladder + budgets | working |
-| Persistence + metrics view | working |
-| Modal deploy, R2 upload, FastAPI | written, **undeployed** |
-| Reader — landing, waiting room, article | typechecks and builds (Next.js 15); never rendered with real data |
+| Persistence + metrics view | working; Postgres (Neon) in production |
+| Serverless deploy (Vercel API + Neon + Groq, stepped jobs) | **live** |
+| Browser scene renderer (all three templates) | **live**; mirrors each template's timeline |
+| Reader — landing, waiting room, article | **live**, redesigned; renders real articles |
+| Modal deploy, R2 upload | written, undeployed (the optional video path) |
 
-**What has and has not been verified.** `architecture_flow` and `plot_reveal` render
-real MP4s through Gate 2 on Manim CE 0.18.1, and the render-snapshot suite checks
-frame containment, text legibility and duration against the actual trace.
-`transform_chain` is unrendered — its `MathTex` needs a LaTeX toolchain that is not
-installed here. The reader typechecks and builds clean. Nothing has run inside a Modal
-sandbox or against a live database, and **no human has judged whether the animations
-are any good**, which is the plan's actual Phase 0 exit criterion.
+**What has been verified.** Real papers run end to end in production: the
+Transformer paper produced 10 visuals and ResNet 7, every one passing Gate 1 on its
+first or second attempt, in about four minutes each on Groq's free tier. The reader
+has been exercised in a real browser at desktop and phone widths. In the Manim path,
+`architecture_flow` and `plot_reveal` render real MP4s through Gate 2 on Manim CE
+0.18.1. Nothing has run inside a Modal sandbox.
 
 ---
 
@@ -59,7 +71,7 @@ are any good**, which is the plan's actual Phase 0 exit criterion.
 ```bash
 pip install -e ".[dev]"
 
-pytest                                  # 109 tests, no network, no key, no Manim
+pytest                                  # 322 tests, no network, no key, no Manim
 python -m eval.run --no-gate2           # the 6-paper eval set against real arXiv
 ruff check arcvisual eval tests
 ```
@@ -93,6 +105,8 @@ modal deploy arcvisual/render/modal_app.py
 ```bash
 python -m arcvisual.render.serve            # :8000, SQLite, renders on
 python -m arcvisual.render.serve --no-gate2 # skip rendering, fastest loop
+python -m arcvisual.render.serve --stepped  # mirror production: advance-driven jobs,
+                                            # scenes animated in the browser
 ```
 
 In production the API is a Modal ASGI app; this serves the same `build_api()` under
@@ -104,25 +118,82 @@ exactly that — so it needs no configuration at all. Without it the reader post
 ### The reader
 
 ```bash
-cd reader && npm install && npm run dev
+cd reader && npm install
+NEXT_PUBLIC_ARCVISUAL_API_BASE=http://localhost:8000 npm run dev
 ```
-
-Three routes:
 
 | Route | What it is | Rendering |
 |---|---|---|
-| `/` | Landing page. Hero derivation typeset at build time, animated pipeline diagram, submit form. | static, 107 kB JS |
-| `/watch/[jobId]` | The waiting room. Named stages, per-scene state, elapsed time, honest failure text. | client (it polls) |
-| `/p/[slug]` | The article. Prose in the initial HTML, sticky visual stage, progressive fill. | server + ISR |
+| `/` | Landing: a live scene in the hero, the gallery of explained papers, the three visual kinds running live. | static, revalidated every 2 min |
+| `/watch/[jobId]` | The waiting room. Drives the job, names the stages, lists visuals as they land, opens the article as soon as its text is ready. | client |
+| `/p/[slug]` | The article. Prose in the initial HTML (inline math typeset), sticky stage of live scenes, fills in place while a job is still running. | server + ISR |
 
-Needs `ARCVISUAL_API_BASE` pointing at the control plane.
+The scene engine lives in `reader/lib/scenes` (plans: parameters → timeline, no DOM)
+and `reader/components/scenes` (renderers: a pure function of time). Each plan mirrors
+its Python template's `estimate_duration`, which is what keeps the captions — fitted
+by the pipeline to the template's runtime — in step with the picture. Scenes autoplay
+when scrolled into view, can be scrubbed, slowed or enlarged, and under
+`prefers-reduced-motion` show their final frame with an explicit play button.
 
-The hero's KaTeX is rendered in a **server** component so the ~275 KB library never
-reaches the landing bundle — it loads only on the article route, where equations are
-actually dynamic. Every animation is `transform`/`opacity` only (compositor-driven, so
-it cannot stutter video decoding on the same page) and every one has a
-`prefers-reduced-motion` branch that *dims rather than removes* the working indicators —
-a reduced-motion reader still needs to know something is happening.
+---
+
+## Deployment
+
+Two Vercel projects from this repository, plus a free Neon Postgres:
+
+```
+browser ──▶ arcvisual.vercel.app        (reader/, Next.js; holds no credentials)
+   │
+   └──────▶ arcvisual-api.vercel.app    (repo root, api/index.py → FastAPI)
+                 │            │
+                 ▼            ▼
+             Neon Postgres   Groq (free tier: qwen3.8 analyze, gpt-oss-120b codegen)
+```
+
+**Stepped execution.** A serverless function cannot run a multi-minute job in one
+go, so `arcvisual/render/stepper.py` advances a job in bounded steps:
+`POST /api/jobs/{id}/advance` takes a database lease on the job, runs ingest, analyze
+or a batch of scenes for up to `ARCVISUAL_STEP_BUDGET_S`, saves everything to the
+job's storyboard, and returns. The waiting room and the article page call it back to
+back; any number of tabs can, because the lease turns all but one away. Finished work
+is never repeated, a step killed by the platform simply lets its lease lapse, and a
+daily cron (`/api/cron/sweep`) moves along any job whose readers left.
+
+**Redeploy** after a change:
+
+```bash
+vercel deploy --prod --scope jiyad2332            # API, from the repo root
+cd reader && vercel deploy --prod --scope jiyad2332   # reader
+```
+
+The API migrates its own schema on the first cold start after a deploy
+(`arcvisual/db/migrate.py`, under a Postgres advisory lock), so there is no separate
+migration step. Bump `PIPELINE_VERSION` in `arcvisual/config.py` when pipeline output
+changes: cached articles are keyed on it and will be rebuilt.
+
+**API environment** (Vercel → arcvisual-api → Settings → Environment Variables):
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | set by the Neon integration |
+| `GROQ_API_KEY` | free key from console.groq.com |
+| `ARCVISUAL_PROVIDER` | `groq` |
+| `IP_HASH_SALT`, `CRON_SECRET` | long random strings |
+| `ARCVISUAL_ALLOWED_ORIGINS` | the reader's URLs, comma-separated |
+| `ARCVISUAL_ALLOWED_ORIGIN_REGEX` | the reader's preview URLs |
+| `ARCVISUAL_TRUSTED_PROXY_HOPS` | `1` (Vercel sets `x-forwarded-for`) |
+| `ARCVISUAL_STEP_BUDGET_S` | `170` (the function limit is 300 s on Hobby) |
+| `ARCVISUAL_SCENE_CONCURRENCY` | `2` |
+| `RATE_LIMIT_PER_HOUR` | new papers per visitor per hour; re-opening explained papers is free |
+
+**Reader environment:** `NEXT_PUBLIC_ARCVISUAL_API_BASE` and `ARCVISUAL_API_BASE`
+(the API URL), `NEXT_PUBLIC_SITE_URL`.
+
+**Cost.** Vercel Hobby, Neon free and Groq's free tier: $0 per month. The binding
+limit is Groq's daily token allowance, roughly 15–25 new papers a day per key;
+explained papers are cached forever and cost nothing to re-open. Switching
+`ARCVISUAL_PROVIDER=anthropic` (with credit on the key) buys deeper analysis — the whole
+paper in one pass, with prompt caching.
 
 ### Database
 

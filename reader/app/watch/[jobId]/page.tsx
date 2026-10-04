@@ -1,60 +1,41 @@
 "use client";
 
 /**
- * The waiting room route: `/watch/:jobId`.
+ * The waiting room: `/watch/:jobId`.
  *
- * A client component on purpose — it exists to poll. The article route stays a server
- * component so its prose is in the initial HTML; this page has nothing to render until
- * the first poll returns, so there is no server-rendering benefit to trade away.
- *
- * On completion it redirects to the article rather than rendering it here, so the
- * permalink a reader shares is `/p/:slug` and never a job id that will mean nothing to
- * anyone else.
+ * It follows the job and, on a serverless deployment, drives it forward. When the
+ * article exists it hands off to the permalink, so what a reader shares is
+ * `/p/:slug` and never a job id that means nothing to anyone else.
  */
 
 import { use, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import PipelineProgress from "../../../components/PipelineProgress";
+import SiteHeader from "../../../components/SiteHeader";
 import { useJobStatus } from "../../../hooks/useJobStatus";
 
-export default function WatchPage({
-  params,
-}: {
-  params: Promise<{ jobId: string }>;
-}) {
+export default function WatchPage({ params }: { params: Promise<{ jobId: string }> }) {
   const { jobId } = use(params);
   const search = useSearchParams();
-  const slugHint = search.get("slug");
   const view = useJobStatus(jobId);
+  const progressSlug = view.status?.stage_progress?.slug;
+  const slug = typeof progressSlug === "string" ? progressSlug : search.get("slug");
+  const title = view.status?.stage_progress?.title;
 
-  const slug =
-    slugHint ??
-    (typeof view.status?.stage_progress?.slug === "string"
-      ? (view.status.stage_progress.slug as string)
-      : null);
-
-  // Hand off to the permalink once the article exists. `replace` rather than `push`
-  // so the browser back button returns to the submit page, not to a finished job.
   useEffect(() => {
     if (view.status?.state === "complete" && slug) {
-      const timeout = window.setTimeout(() => {
-        window.location.replace(`/p/${slug}?job=${jobId}`);
-      }, 900); // a beat, so the completed state is visible rather than a flash
-      return () => window.clearTimeout(timeout);
+      // A beat, so the finished state registers rather than flashing past.
+      const id = window.setTimeout(() => window.location.replace(`/p/${slug}`), 900);
+      return () => window.clearTimeout(id);
     }
-  }, [view.status?.state, slug, jobId]);
-
-  // Ingest resolves the title within seconds, so show it as soon as it exists —
-  // otherwise the header reads "Reading your paper" while the stage list already
-  // says "Animating", which makes the page look like it is not tracking anything.
-  const title =
-    typeof view.status?.stage_progress?.title === "string"
-      ? (view.status.stage_progress.title as string)
-      : undefined;
+  }, [view.status?.state, slug]);
 
   return (
-    <main>
-      <PipelineProgress {...view} slug={slug} title={title} />
-    </main>
+    <>
+      <SiteHeader cta={false} />
+      <main>
+        <PipelineProgress {...view} slug={slug} title={typeof title === "string" ? title : undefined} />
+      </main>
+    </>
   );
 }

@@ -618,7 +618,9 @@ def recent_papers(session: Session, *, limit: int = 12) -> list[dict]:
                 "visuals": len(scenes),
                 "archetypes": sorted({s["spec"]["archetype"] for s in scenes}),
                 "sections": len(sb.get("sections", [])),
-                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                "completed_at": job.completed_at.isoformat()
+                if job.completed_at
+                else None,
             }
         )
     return out

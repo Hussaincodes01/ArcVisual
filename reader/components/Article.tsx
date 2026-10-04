@@ -1,186 +1,141 @@
 "use client";
 
 /**
- * The reading experience: prose left, sticky visual stage right, single column on
- * mobile.
+ * The reading experience: prose on the left, a sticky stage of visuals on the
+ * right, one column on small screens.
  *
- * Scrollama drives *which* scene is on the stage — it is the de facto standard for
- * exactly this and costs about 2KB. It does not drive playback; each SceneSlot owns
- * its own IntersectionObserver, so a scene plays when it is visible whether or not
- * Scrollama has settled.
+ * Scrollama decides which section's visuals are on the stage. It does not drive
+ * playback — each scene autoplays from its own IntersectionObserver.
  *
- * Progressive fill polls `GET /api/jobs/{id}` when a `jobId` is supplied. Polling
- * rather than SSE is deliberate (see arcvisual/render/api.py): one JSONB read,
- * survives every proxy, nothing to operate.
+ * While the job behind this article is still running, the page drives it (a
+ * serverless job only moves while someone asks it to) and refetches the document
+ * whenever another visual lands, so scenes fill in place without a reload.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import katex from "katex";
-import "katex/dist/katex.min.css";
-import { fetchJob } from "../lib/api";
-import { isShippable, type Scene, type Section, type Storyboard } from "../lib/types";
+import { fetchPaperFresh } from "../lib/api";
+import { isTerminalScene, type PaperResponse, type Scene, type Section, type Storyboard } from "../lib/types";
+import { useJobStatus } from "../hooks/useJobStatus";
+import { ArcDots } from "./ArcLoader";
 import SceneSlot from "./SceneSlot";
 
+const NO_MACROS: Record<string, string> = {};
+
+/** Mirrors arcvisual/ingest/latex.py EQ_MARKER: where a display equation sat. */
+const EQ_MARKER = "⟦eq⟧";
+
 interface Props {
-  storyboard: Storyboard;
-  mediaBase: string;
-  /** Present while the pipeline is still filling slots. */
-  jobId?: string;
+  initial: PaperResponse;
 }
 
-export default function Article({ storyboard, mediaBase, jobId }: Props) {
-  const [activeSection, setActiveSection] = useState<string | null>(null);
-  const [readyKeys, setReadyKeys] = useState<Set<string>>(
-    () => new Set(storyboard.scenes.filter(isShippable).map((s) => s.spec.id))
-  );
-  const [jobState, setJobState] = useState<string | null>(null);
+export default function Article({ initial }: Props) {
+  const [doc, setDoc] = useState(initial);
+  const storyboard = doc.storyboard;
+  const building = doc.state !== undefined && doc.state !== "complete" && doc.state !== "failed";
+  const job = useJobStatus(building ? doc.job_id : null);
+
+  // Refetch the document whenever the job reports progress, and once at the end.
+  const progressKey = `${job.status?.state ?? ""}:${job.status?.stage_progress?.scenes_done ?? ""}`;
+  useEffect(() => {
+    if (!building || !job.status) return;
+    let cancelled = false;
+    fetchPaperFresh(storyboard.paper.slug)
+      .then((fresh) => {
+        if (!cancelled && fresh) setDoc(fresh);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progressKey]);
 
   const sections = useMemo(() => orderedSections(storyboard), [storyboard]);
   const scenesBySection = useMemo(() => groupScenes(storyboard), [storyboard]);
-  const pendingCount = storyboard.scenes.filter((s) => !isShippable(s)).length;
+  const conceptNames = useMemo(() => new Map(storyboard.concepts.map((c) => [c.id, c.name])), [storyboard]);
+  const macros = storyboard.paper.tex_macros ?? NO_MACROS;
+  const pending = storyboard.scenes.filter((s) => !isTerminalScene(s)).length;
+  const ready = storyboard.scenes.filter((s) => s.state === "passed").length;
 
-  // -- progressive fill --------------------------------------------------- //
+  const [active, setActive] = useState<string | null>(null);
   useEffect(() => {
-    if (!jobId || pendingCount === 0) return;
-    let cancelled = false;
-    let delay = 3000; // back off to 10s after the first couple of minutes
-    let elapsed = 0;
-
-    const tick = async () => {
-      if (cancelled) return;
-      try {
-        const status = await fetchJob(jobId);
-        if (cancelled) return;
-        setJobState(status.state);
-        setReadyKeys((prev) => {
-          const next = new Set(prev);
-          for (const s of status.scenes) if (s.ready) next.add(s.key);
-          return next;
-        });
-        if (status.state === "complete" || status.state === "failed") {
-          // The document itself changed; a reload picks up the new artifacts.
-          if (status.state === "complete") window.location.reload();
-          return;
-        }
-      } catch {
-        // A failed poll is not worth surfacing; the next one will tell us.
-      }
-      elapsed += delay;
-      if (elapsed > 120_000) delay = 10_000;
-      window.setTimeout(tick, delay);
-    };
-
-    const handle = window.setTimeout(tick, delay);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(handle);
-    };
-  }, [jobId, pendingCount]);
-
-  // -- scrollama ---------------------------------------------------------- //
-  const stepsRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    let scroller: { destroy?: () => void } | null = null;
+    let destroy: (() => void) | undefined;
     let disposed = false;
-
     void (async () => {
       try {
         const mod = await import("scrollama");
         if (disposed) return;
         const instance = mod.default();
         instance
-          .setup({ step: "[data-step]", offset: 0.5, progress: false })
-          .onStepEnter(({ element }: { element: HTMLElement }) => {
-            setActiveSection(element.dataset.step ?? null);
-          });
-        window.addEventListener("resize", instance.resize);
-        scroller = {
-          destroy: () => {
-            window.removeEventListener("resize", instance.resize);
-            instance.destroy();
-          },
+          .setup({ step: "[data-step]", offset: 0.4 })
+          .onStepEnter(({ element }: { element: HTMLElement }) => setActive(element.dataset.step ?? null));
+        const onResize = () => instance.resize();
+        window.addEventListener("resize", onResize);
+        destroy = () => {
+          window.removeEventListener("resize", onResize);
+          instance.destroy();
         };
       } catch {
-        // Scrollama is an enhancement. Without it the article still reads; the
-        // stage simply shows the first section's scene.
+        // An enhancement: without it the stage shows the first section's visuals.
       }
     })();
-
     return () => {
       disposed = true;
-      scroller?.destroy?.();
+      destroy?.();
     };
-  }, []);
+  }, [sections.length]);
 
-  const stageScenes =
-    (activeSection && scenesBySection.get(activeSection)) ||
-    scenesBySection.get(sections[0]?.id ?? "") ||
-    [];
+  const firstWithScenes = sections.find((s) => scenesBySection.has(s.id))?.id;
+  const stageId = active && scenesBySection.has(active) ? active : (lastWithScenesBefore(sections, active, scenesBySection) ?? firstWithScenes);
+  const stageScenes = (stageId && scenesBySection.get(stageId)) || [];
+  const stageSection = sections.find((s) => s.id === stageId);
 
   return (
-    <div className="mx-auto max-w-[96rem] px-4 pb-32 lg:px-8">
-      <Header storyboard={storyboard} pendingCount={pendingCount} jobState={jobState} />
+    <div className="mx-auto max-w-7xl px-4 pb-32 sm:px-6 lg:px-10">
+      <Header storyboard={storyboard} pending={pending} ready={ready} building={building} failed={doc.state === "failed"} />
 
-      <div className="grid gap-10 lg:grid-cols-[minmax(0,58ch)_minmax(0,1fr)]">
-        {/* Prose column */}
-        <div ref={stepsRef}>
+      {/* grid-cols-1 pins the single mobile column to the viewport. Without it the
+          implicit track grows to fit its widest child — a long equation — and the
+          whole page scrolled sideways on phones. */}
+      <div className="mt-12 grid grid-cols-1 gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.92fr)]">
+        <div className="min-w-0">
           {sections.map((section) => {
             const scenes = scenesBySection.get(section.id) ?? [];
             return (
-              <section
-                key={section.id}
-                id={section.id}
-                data-step={section.id}
-                className="mb-16 scroll-mt-24"
-              >
-                <SectionHeading section={section} originUrl={storyboard.paper.origin_url} />
-                <Prose section={section} storyboard={storyboard} />
-
-                {/* On mobile the stage is inline, at full width. */}
-                <div className="mt-6 space-y-6 lg:hidden">
-                  {scenes.map((scene) => (
-                    <SceneSlot
-                      key={scene.spec.id}
-                      scene={scene}
-                      mediaBase={mediaBase}
-                      sectionHeading={section.heading_path.at(-1) ?? section.id}
-                      originUrl={storyboard.paper.origin_url}
-                      pending={!readyKeys.has(scene.spec.id) && !isShippable(scene)}
-                    />
-                  ))}
-                </div>
+              <section key={section.id} id={section.id} data-step={section.id} className="mb-16 scroll-mt-24">
+                <SectionHeading section={section} concepts={section.concept_ids.map((id) => conceptNames.get(id)).filter(Boolean) as string[]} originUrl={storyboard.paper.origin_url} />
+                <Prose section={section} storyboard={storyboard} macros={macros} />
+                {scenes.length ? (
+                  <div className="mt-8 space-y-6 lg:hidden">
+                    {scenes.map((scene) => (
+                      <SceneSlot key={scene.spec.id} scene={scene} sectionHeading={section.heading_path.at(-1) ?? section.id} mediaBase={doc.media_base} originUrl={storyboard.paper.origin_url} macros={macros} />
+                    ))}
+                  </div>
+                ) : null}
               </section>
             );
           })}
         </div>
 
-        {/* Sticky visual stage (desktop only) */}
-        <div className="stage hidden lg:block">
-          <div className="space-y-6">
-            {stageScenes.length > 0 ? (
-              stageScenes.map((scene) => (
-                <SceneSlot
-                  key={scene.spec.id}
-                  scene={scene}
-                  mediaBase={mediaBase}
-                  sectionHeading={
-                    sections.find((s) => s.id === scene.spec.span.section_id)
-                      ?.heading_path.at(-1) ?? scene.spec.span.section_id
-                  }
-                  originUrl={storyboard.paper.origin_url}
-                  pending={!readyKeys.has(scene.spec.id) && !isShippable(scene)}
-                />
-              ))
-            ) : (
-              <p className="rounded-lg border border-dashed border-border p-6 text-sm text-muted">
-                This section is carried by prose. Not everything needs an animation.
-              </p>
-            )}
-          </div>
-        </div>
+        <aside className="stage hidden lg:block" aria-label="Visuals for the section you are reading">
+          {stageScenes.length ? (
+            <div className="space-y-6">
+              {stageScenes.map((scene) => (
+                <SceneSlot key={scene.spec.id} scene={scene} sectionHeading={stageSection?.heading_path.at(-1) ?? scene.spec.span.section_id} mediaBase={doc.media_base} originUrl={storyboard.paper.origin_url} macros={macros} />
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-[var(--radius-card)] border-[1.5px] border-dashed border-ink bg-paper p-8 text-ink-soft">
+              {storyboard.scenes.length === 0 && !building
+                ? "This paper reads best as prose, so it has no visuals. Not every idea needs an animation."
+                : "Visuals appear here beside the sections they explain."}
+            </div>
+          )}
+        </aside>
       </div>
 
-      <Outline sections={sections} active={activeSection} />
+      <Outline sections={sections} active={active} withScenes={scenesBySection} />
     </div>
   );
 }
@@ -189,164 +144,223 @@ export default function Article({ storyboard, mediaBase, jobId }: Props) {
 
 function Header({
   storyboard,
-  pendingCount,
-  jobState,
+  pending,
+  ready,
+  building,
+  failed,
 }: {
   storyboard: Storyboard;
-  pendingCount: number;
-  jobState: string | null;
+  pending: number;
+  ready: number;
+  building: boolean;
+  failed: boolean;
 }) {
   const { paper } = storyboard;
+  const [open, setOpen] = useState(false);
+  const pdf = paper.arxiv_id ? `https://arxiv.org/pdf/${paper.arxiv_id}` : null;
+  const categories = paper.categories ?? [];
   return (
-    <header className="mb-14 border-b border-border pb-8 pt-10">
-      <p className="mb-3 text-xs uppercase tracking-widest text-muted">
-        ArcVisual · a companion to the paper, not a replacement
-      </p>
-      <h1 className="max-w-3xl text-3xl font-semibold leading-tight text-fg sm:text-4xl">
-        {paper.title}
-      </h1>
-      <p className="mt-3 max-w-3xl text-sm text-muted">
-        {paper.authors.slice(0, 6).join(", ")}
-        {paper.authors.length > 6 ? " et al." : ""}
-      </p>
-      <p className="prose-arc mt-6 text-muted">{paper.abstract}</p>
-      <div className="mt-6 flex flex-wrap items-center gap-4 text-sm">
-        <a
-          className="text-accent underline decoration-dotted"
-          href={paper.origin_url}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Read the original paper →
-        </a>
-        <span className="text-muted">{paper.license.includes("creativecommons") ? "CC-licensed" : "arXiv licence"}</span>
-        {pendingCount > 0 ? (
-          <span className="rounded bg-surface px-2 py-1 text-xs text-muted">
-            {pendingCount} animation{pendingCount === 1 ? "" : "s"} still rendering
-            {jobState ? ` · ${jobState}` : ""}
+    <header className="rounded-[2rem] border-[1.5px] border-ink bg-paper p-6 sm:p-10">
+      <div className="flex flex-wrap items-center gap-2">
+        {categories.slice(0, 3).map((c, i) => (
+          <span key={c} className={`pill text-xs ${["bg-lavender", "bg-mustard", "bg-paper"][i % 3]}`}>
+            {c}
           </span>
-        ) : null}
+        ))}
+        {paper.arxiv_id ? <span className="pill bg-paper text-xs">arXiv {paper.arxiv_id}</span> : null}
       </div>
+      <h1 className="mt-5 max-w-4xl text-[clamp(1.9rem,4.2vw,3.25rem)] font-semibold leading-[1.06] tracking-[-0.03em]">{paper.title}</h1>
+      <p className="mt-4 max-w-3xl text-ink-soft">
+        {paper.authors.slice(0, 8).join(", ")}
+        {paper.authors.length > 8 ? `, and ${paper.authors.length - 8} more` : ""}
+      </p>
+
+      {paper.abstract ? (
+        <div className="mt-6 max-w-3xl">
+          <p className={`leading-relaxed text-ink-soft ${open ? "" : "line-clamp-3"}`}>{paper.abstract}</p>
+          <button type="button" onClick={() => setOpen((o) => !o)} className="mt-2 text-sm font-medium underline decoration-coral decoration-2 underline-offset-4">
+            {open ? "Show less" : "Read the full abstract"}
+          </button>
+        </div>
+      ) : null}
+
+      <div className="mt-8 flex flex-wrap items-center gap-3">
+        <a href={paper.origin_url} target="_blank" rel="noreferrer" className="btn btn-coral">
+          Open on arXiv
+        </a>
+        {pdf ? (
+          <a href={pdf} target="_blank" rel="noreferrer" className="btn btn-ghost">
+            PDF
+          </a>
+        ) : null}
+        <span className="text-sm text-muted">
+          {paper.license.includes("creativecommons") ? "CC-licensed paper" : "Figures stay with the paper; we link to them"}
+        </span>
+      </div>
+
+      {building || pending > 0 ? (
+        <p className="mt-6 inline-flex items-center gap-3 rounded-full border-[1.5px] border-ink bg-mustard-soft px-4 py-2 text-sm" role="status">
+          {storyboard.scenes.length === 0
+            ? "Working out which ideas deserve a visual"
+            : `Building visuals: ${ready} of ${storyboard.scenes.length} ready`}
+          <ArcDots />
+        </p>
+      ) : null}
+      {failed ? (
+        <p className="mt-6 rounded-xl border-[1.5px] border-ink bg-wash px-4 py-3 text-sm">
+          This explainer stopped before it finished. The text below is complete; some visuals may be missing.
+        </p>
+      ) : null}
     </header>
   );
 }
 
-function SectionHeading({
-  section,
-  originUrl,
-}: {
-  section: Section;
-  originUrl: string;
-}) {
+function SectionHeading({ section, concepts, originUrl }: { section: Section; concepts: string[]; originUrl: string }) {
   const depth = section.heading_path.length;
   const text = section.heading_path.at(-1) ?? section.id;
+  const Tag = depth <= 1 ? "h2" : "h3";
   return (
-    <div className="mb-4 flex items-baseline justify-between gap-4">
-      {depth <= 1 ? (
-        <h2 className="text-2xl font-semibold text-fg">{text}</h2>
-      ) : (
-        <h3 className="text-xl font-semibold text-fg">{text}</h3>
-      )}
-      {/* Every section links out. ArcVisual is a companion and should say so. */}
-      <a
-        className="shrink-0 text-xs text-muted underline decoration-dotted hover:text-accent"
-        href={originUrl}
-        target="_blank"
-        rel="noreferrer"
-      >
-        view in original
-      </a>
+    <div className="mb-5">
+      <div className="flex items-start justify-between gap-4">
+        <Tag className={depth <= 1 ? "text-[1.75rem] font-semibold leading-tight tracking-tight" : "text-xl font-semibold leading-snug"}>{text}</Tag>
+        <a href={originUrl} target="_blank" rel="noreferrer" className="mt-1 shrink-0 text-xs text-muted underline decoration-dotted underline-offset-4 hover:text-coral">
+          In the paper
+        </a>
+      </div>
+      {section.difficulty || concepts.length ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {section.difficulty ? <Difficulty level={section.difficulty} /> : null}
+          {concepts.slice(0, 4).map((c) => (
+            <span key={c} className="pill bg-lavender-soft text-xs">
+              {c}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function Prose({
-  section,
-  storyboard,
-}: {
-  section: Section;
-  storyboard: Storyboard;
-}) {
-  const equations = storyboard.equations.filter((e) =>
-    section.equation_ids.includes(e.id)
+function Difficulty({ level }: { level: number }) {
+  return (
+    <span className="pill bg-paper text-xs" title={`Difficulty ${level} of 5`}>
+      <span className="flex gap-0.5" aria-hidden="true">
+        {[1, 2, 3, 4, 5].map((i) => (
+          <span key={i} className={`block h-2.5 w-1.5 rounded-sm border border-ink ${i <= level ? "bg-coral" : "bg-paper"}`} />
+        ))}
+      </span>
+      <span className="sr-only">Difficulty {level} of 5</span>
+      <span aria-hidden="true">{["", "Gentle", "Moderate", "Involved", "Hard", "Very hard"][level] ?? ""}</span>
+    </span>
   );
-  const paragraphs = section.prose_md
-    .split(/\n{2,}/)
-    .map((p) => p.trim())
-    .filter(Boolean);
+}
+
+function Prose({ section, storyboard, macros }: { section: Section; storyboard: Storyboard; macros: Record<string, string> }) {
+  const equations = useMemo(
+    () => section.equation_ids.map((id) => storyboard.equations.find((e) => e.id === id)).filter((e): e is NonNullable<typeof e> => Boolean(e)),
+    [section.equation_ids, storyboard.equations],
+  );
+  const blocks = useMemo(() => {
+    const out: ({ kind: "p"; text: string } | { kind: "eq"; latex: string })[] = [];
+    let next = 0;
+    for (const raw of section.prose_md.split(/\n{2,}/)) {
+      const text = raw.trim();
+      if (!text) continue;
+      if (text === EQ_MARKER) {
+        if (next < equations.length) out.push({ kind: "eq", latex: equations[next++].latex });
+        continue;
+      }
+      // A marker glued to text (older documents): split it out.
+      const parts = text.split(EQ_MARKER);
+      parts.forEach((part, i) => {
+        if (part.trim()) out.push({ kind: "p", text: part.trim() });
+        if (i < parts.length - 1 && next < equations.length) out.push({ kind: "eq", latex: equations[next++].latex });
+      });
+    }
+    // Documents ingested before markers existed: equations after the text.
+    for (; next < equations.length; next++) out.push({ kind: "eq", latex: equations[next].latex });
+    return out;
+  }, [section.prose_md, equations]);
 
   return (
     <div className="prose-arc">
-      {paragraphs.map((text, i) => (
-        <p key={i}>{text}</p>
-      ))}
-      {equations.map((eq) => (
-        <Math key={eq.id} latex={eq.latex} />
-      ))}
+      {blocks.map((b, i) => (b.kind === "p" ? <p key={i}>{inlineMath(b.text, macros)}</p> : <DisplayMath key={i} latex={b.latex} macros={macros} />))}
     </div>
   );
 }
 
+const INLINE_MATH = /(\$\$[^$]+\$\$|\$[^$\n]{1,400}\$|\\\([^)]{1,400}\\\))/g;
+
+function inlineMath(text: string, macros: Record<string, string>): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  for (const m of text.matchAll(INLINE_MATH)) {
+    const at = m.index ?? 0;
+    if (at > last) out.push(text.slice(last, at));
+    const raw = m[0];
+    const latex = raw.startsWith("$$") ? raw.slice(2, -2) : raw.startsWith("$") ? raw.slice(1, -1) : raw.slice(2, -2);
+    let html = "";
+    try {
+      // Macros copied per call: KaTeX writes \gdef definitions into the object.
+      html = katex.renderToString(latex, { displayMode: false, throwOnError: true, strict: "ignore", macros: { ...macros } });
+    } catch {
+      html = "";
+    }
+    out.push(html ? <span key={at} dangerouslySetInnerHTML={{ __html: html }} /> : raw);
+    last = at + raw.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
 /**
- * KaTeX, rendered synchronously. That is the whole reason KaTeX over MathJax: an
- * async typesetter reflows the page mid-scroll, and reflow during a scroll-driven
- * reading experience is the one jank a reader always notices.
+ * Ingest stores the inside of an `align`/`eqnarray`, so alignment points (`&`) and
+ * line breaks (`\\`) arrive bare, which KaTeX rejects outside an environment. Put
+ * them back in `aligned`, and drop numbering commands that mean nothing here.
  */
-function Math({ latex }: { latex: string }) {
+function prepareDisplay(latex: string): string {
+  const body = latex.replace(/\\(?:nonumber|notag)\b/g, "").trim();
+  const aligned = /(^|[^\\])&/.test(body) || /\\\\/.test(body);
+  if (aligned && !/\\begin\{/.test(body)) return `\\begin{aligned}${body}\\end{aligned}`;
+  return body;
+}
+
+/** KaTeX renders synchronously, so equations never reflow the page mid-scroll. */
+function DisplayMath({ latex, macros }: { latex: string; macros: Record<string, string> }) {
   const html = useMemo(() => {
     try {
-      return katex.renderToString(latex, {
-        displayMode: true,
-        throwOnError: false,
-        strict: "ignore",
-      });
+      return katex.renderToString(prepareDisplay(latex), { displayMode: true, throwOnError: false, strict: "ignore", macros: { ...macros } });
     } catch {
       return "";
     }
-  }, [latex]);
-
+  }, [latex, macros]);
   if (!html) {
-    return (
-      <pre className="scroll-x rounded border border-border bg-surface/60 p-3 text-xs text-muted">
-        {latex}
-      </pre>
-    );
+    return <pre className="scroll-x my-5 rounded-xl border-[1.5px] border-ink bg-wash p-3 text-xs">{latex}</pre>;
   }
-  return (
-    <div
-      className="scroll-x my-5"
-      // KaTeX output only; the LaTeX itself came verbatim from the paper source.
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
-  );
+  return <div className="scroll-x my-6 rounded-[var(--radius-tile)] border-[1.5px] border-line bg-paper px-4 py-3" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-function Outline({
-  sections,
-  active,
-}: {
-  sections: Section[];
-  active: string | null;
-}) {
+function Outline({ sections, active, withScenes }: { sections: Section[]; active: string | null; withScenes: Map<string, Scene[]> }) {
+  const ref = useRef<HTMLDivElement | null>(null);
   const index = active ? sections.findIndex((s) => s.id === active) : 0;
-  const progress = sections.length ? ((index + 1) / sections.length) * 100 : 0;
+  const pct = sections.length ? ((index + 1) / sections.length) * 100 : 0;
+  useEffect(() => {
+    ref.current?.querySelector(`[data-o="${active}"]`)?.scrollIntoView({ block: "nearest", inline: "center" });
+  }, [active]);
   return (
-    <nav className="fixed inset-x-0 bottom-0 border-t border-border bg-canvas/95 backdrop-blur">
-      <div
-        className="h-0.5 bg-accent transition-[width] duration-300"
-        style={{ width: `${progress}%` }}
-      />
-      <div className="scroll-x mx-auto flex max-w-7xl gap-4 px-4 py-2 text-xs lg:px-8">
+    <nav aria-label="Sections" className="fixed inset-x-3 bottom-3 z-30 mx-auto max-w-5xl rounded-2xl border-[1.5px] border-ink bg-paper/95 backdrop-blur">
+      <div className="h-1 overflow-hidden rounded-t-2xl bg-wash">
+        <div className="h-full bg-coral transition-[width] duration-300" style={{ width: `${pct}%` }} />
+      </div>
+      <div ref={ref} className="scroll-x flex gap-1.5 px-2 py-2 text-xs [scrollbar-width:none]">
         {sections.map((s) => (
           <a
             key={s.id}
+            data-o={s.id}
             href={`#${s.id}`}
-            className={
-              s.id === active
-                ? "whitespace-nowrap text-accent"
-                : "whitespace-nowrap text-muted hover:text-fg"
-            }
+            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 transition-colors ${s.id === active ? "bg-ink text-paper" : "text-ink-soft hover:bg-wash"}`}
           >
+            {withScenes.has(s.id) ? <span className="size-1.5 rounded-full bg-coral" aria-label="has visuals" /> : null}
             {s.heading_path.at(-1)}
           </a>
         ))}
@@ -357,25 +371,28 @@ function Outline({
 
 // --------------------------------------------------------------------------- //
 
-function orderedSections(storyboard: Storyboard): Section[] {
-  const byId = new Map(storyboard.sections.map((s) => [s.id, s]));
-  const ordered = storyboard.reading_order.length
-    ? storyboard.reading_order.map((id) => byId.get(id)).filter(Boolean as unknown as (s: Section | undefined) => s is Section)
-    : storyboard.sections;
-  // Structural parents (a bare \section followed straight by a subsection) carry
-  // no prose and would render as an empty step.
+function orderedSections(sb: Storyboard): Section[] {
+  const byId = new Map(sb.sections.map((s) => [s.id, s]));
+  const ordered = sb.reading_order.length ? sb.reading_order.map((id) => byId.get(id)).filter((s): s is Section => Boolean(s)) : sb.sections;
+  // Structural parents (a bare \section followed by a subsection) carry no prose.
   return ordered.filter((s) => s.prose_md.trim().length > 0);
 }
 
-function groupScenes(storyboard: Storyboard): Map<string, Scene[]> {
+function groupScenes(sb: Storyboard): Map<string, Scene[]> {
   const map = new Map<string, Scene[]>();
-  for (const scene of storyboard.scenes) {
-    if (scene.state === "failed") continue; // prose-only; no slot at all
+  for (const scene of sb.scenes) {
+    if (scene.state === "failed") continue; // carried by the prose; no slot at all
     const key = scene.spec.span.section_id;
-    const list = map.get(key) ?? [];
-    list.push(scene);
-    map.set(key, list);
+    map.set(key, [...(map.get(key) ?? []), scene]);
   }
   for (const list of map.values()) list.sort((a, b) => a.spec.priority - b.spec.priority);
   return map;
+}
+
+/** Keep the most recent section's visuals on stage while reading prose-only sections. */
+function lastWithScenesBefore(sections: Section[], active: string | null, map: Map<string, Scene[]>): string | undefined {
+  if (!active) return undefined;
+  const at = sections.findIndex((s) => s.id === active);
+  for (let i = at; i >= 0; i--) if (map.has(sections[i].id)) return sections[i].id;
+  return undefined;
 }

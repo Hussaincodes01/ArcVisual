@@ -82,6 +82,11 @@ class SceneOutcome:
     cost_attributed: bool = True
     provider: str = "heuristic"
     notes: list[str] = field(default_factory=list)
+    #: True when the scene stopped for a reason that says nothing about the scene —
+    #: a rate limit, a timeout, or running out of the caller's time — before any
+    #: attempt completed. A caller that can come back later (the serverless stepper)
+    #: should retry it rather than ship the degradation as final.
+    transient: bool = False
 
     @property
     def cost_usd(self) -> float:
@@ -100,8 +105,18 @@ def build_scene(
     client: object | None = None,
     renderer: g2_runtime.Renderer | None = None,
     run_gate2: bool = True,
+    deadline: float | None = None,
 ) -> SceneOutcome:
-    """Take one opportunity to a terminal state. Never raises for scene reasons."""
+    """Take one opportunity to a terminal state. Never raises for scene reasons.
+
+    ``deadline`` is a ``time.monotonic()`` instant after which no new attempt is
+    started — a serverless invocation has a hard end, and an attempt begun past it
+    would be killed mid-call with nothing recorded.
+    """
+    import time
+
+    from arcvisual.providers.base import RetryableProviderError
+
     cfg = settings()
     budgets = cfg.budgets
     outcome = SceneOutcome(scene=_pending(opportunity))
@@ -111,6 +126,10 @@ def build_scene(
     simplify_next = False
 
     for attempt_no in range(1, budgets.max_attempts + 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            outcome.notes.append(f"out of time before attempt {attempt_no}")
+            outcome.transient = not outcome.attempts
+            break
         # The ceiling is checked *before* spending, which is the only place it
         # can actually prevent a cost overrun.
         if spent >= budgets.scene_cost_ceiling_usd:
@@ -133,6 +152,11 @@ def build_scene(
         except Exception as exc:
             log.warning("codegen raised for %s: %s", opportunity.id, exc)
             outcome.notes.append(f"codegen error on attempt {attempt_no}: {exc}")
+            # A rate limit or timeout before anything completed is about the
+            # moment, not the scene.
+            outcome.transient = isinstance(exc, RetryableProviderError) and not (
+                outcome.attempts
+            )
             break
 
         spent += gen.cost_usd
@@ -409,7 +433,9 @@ def _artifact_for(
             try:
                 assets = storage.derive_assets(video, video.parent / "derived")
             except Exception as exc:  # ffmpeg absent or a codec missing
-                log.info("could not derive poster/webm for %s: %s", gen.scene.spec.id, exc)
+                log.info(
+                    "could not derive poster/webm for %s: %s", gen.scene.spec.id, exc
+                )
 
             # save_scene_local returns {key: bytes_written}, not paths.
             written = storage.save_scene_local(video, keys, assets=assets)
