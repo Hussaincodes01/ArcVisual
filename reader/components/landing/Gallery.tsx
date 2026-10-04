@@ -2,6 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { submitPaper } from "../../lib/api";
+import { plainText } from "../../lib/tex";
 import type { RecentPaper } from "../../lib/types";
 import { EXAMPLES } from "../SubmitForm";
 
@@ -156,7 +157,7 @@ export default function Gallery({ papers }: { papers: RecentPaper[] }) {
                   <Glyph kind={primary} dark={dark} />
                 </div>
               </div>
-              <h3 className="mt-4 line-clamp-2 min-h-[3.1rem] text-[1.15rem] font-semibold leading-snug tracking-tight">{p.title}</h3>
+              <h3 className="mt-4 line-clamp-2 min-h-[3.1rem] text-[1.15rem] font-semibold leading-snug tracking-tight">{plainText(p.title)}</h3>
               <p className="mt-1 line-clamp-1 text-sm text-muted">{authorsLine(p.authors)}</p>
               <p className="mt-3 text-sm text-ink-soft">
                 {p.visuals} {p.visuals === 1 ? "visual" : "visuals"}, {p.sections} sections

@@ -350,3 +350,18 @@ def test_equation_numbering_macros_expand_to_nothing() -> None:
 
     numbering = r"\newcommand{\eqnr}{\addtocounter{equation}{1}\tag{\theequation}}"
     assert extract_macros([numbering]) == {r"\eqnr": "{}"}
+
+
+def test_a_derivation_step_cannot_wrap_math_in_a_sentence() -> None:
+    """The live Transformer article had a step reading "for any fixed offset $k$,
+    $PE_{pos+k}$ can be represented as a linear function of $PE_{pos}$"."""
+    import pytest
+    from pydantic import ValidationError
+
+    from arcvisual.templates.transform_chain import Params
+
+    mixed = "for any fixed offset $k$, $PE_{pos+k}$ is a linear function of $PE_{pos}$"
+    with pytest.raises(ValidationError, match="English sentence"):
+        Params(steps=[mixed, "x = y"])
+    # A step that is only math, delimited or not, is fine.
+    assert Params(steps=["$a = b$", "c = d"]).steps == ["a = b", "c = d"]

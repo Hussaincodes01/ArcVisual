@@ -17,6 +17,8 @@ import katex from "katex";
 import { fetchPaperFresh } from "../lib/api";
 import { isTerminalScene, type PaperResponse, type Scene, type Section, type Storyboard } from "../lib/types";
 import { useJobStatus } from "../hooks/useJobStatus";
+import { plainText, toUnicode, toWords } from "../lib/tex";
+import MathText from "./MathText";
 import { ArcDots } from "./ArcLoader";
 import SceneSlot from "./SceneSlot";
 
@@ -93,7 +95,7 @@ export default function Article({ initial }: Props) {
 
   return (
     <div className="mx-auto max-w-7xl px-4 pb-32 sm:px-6 lg:px-10">
-      <Header storyboard={storyboard} pending={pending} ready={ready} building={building} failed={doc.state === "failed"} />
+      <Header storyboard={storyboard} pending={pending} ready={ready} building={building} failed={doc.state === "failed"} macros={macros} />
 
       {/* grid-cols-1 pins the single mobile column to the viewport. Without it the
           implicit track grows to fit its widest child — a long equation — and the
@@ -104,7 +106,7 @@ export default function Article({ initial }: Props) {
             const scenes = scenesBySection.get(section.id) ?? [];
             return (
               <section key={section.id} id={section.id} data-step={section.id} className="mb-16 scroll-mt-24">
-                <SectionHeading section={section} concepts={section.concept_ids.map((id) => conceptNames.get(id)).filter(Boolean) as string[]} originUrl={storyboard.paper.origin_url} />
+                <SectionHeading section={section} concepts={section.concept_ids.map((id) => conceptNames.get(id)).filter(Boolean) as string[]} originUrl={storyboard.paper.origin_url} macros={macros} />
                 <Prose section={section} storyboard={storyboard} macros={macros} />
                 {scenes.length ? (
                   <div className="mt-8 space-y-6 lg:hidden">
@@ -135,7 +137,7 @@ export default function Article({ initial }: Props) {
         </aside>
       </div>
 
-      <Outline sections={sections} active={active} withScenes={scenesBySection} />
+      <Outline sections={sections} active={active} withScenes={scenesBySection} macros={macros} />
     </div>
   );
 }
@@ -148,12 +150,14 @@ function Header({
   ready,
   building,
   failed,
+  macros,
 }: {
   storyboard: Storyboard;
   pending: number;
   ready: number;
   building: boolean;
   failed: boolean;
+  macros: Record<string, string>;
 }) {
   const { paper } = storyboard;
   const [open, setOpen] = useState(false);
@@ -169,7 +173,9 @@ function Header({
         ))}
         {paper.arxiv_id ? <span className="pill bg-paper text-xs">arXiv {paper.arxiv_id}</span> : null}
       </div>
-      <h1 className="mt-5 max-w-4xl text-[clamp(1.9rem,4.2vw,3.25rem)] font-semibold leading-[1.06] tracking-[-0.03em]">{paper.title}</h1>
+      <h1 className="mt-5 max-w-4xl text-[clamp(1.9rem,4.2vw,3.25rem)] font-semibold leading-[1.06] tracking-[-0.03em]">
+        <MathText text={paper.title} macros={macros} />
+      </h1>
       <p className="mt-4 max-w-3xl text-ink-soft">
         {paper.authors.slice(0, 8).join(", ")}
         {paper.authors.length > 8 ? `, and ${paper.authors.length - 8} more` : ""}
@@ -177,7 +183,9 @@ function Header({
 
       {paper.abstract ? (
         <div className="mt-6 max-w-3xl">
-          <p className={`leading-relaxed text-ink-soft ${open ? "" : "line-clamp-3"}`}>{paper.abstract}</p>
+          <p className={`leading-relaxed text-ink-soft ${open ? "" : "line-clamp-3"}`}>
+            <MathText text={paper.abstract} macros={macros} />
+          </p>
           <button type="button" onClick={() => setOpen((o) => !o)} className="mt-2 text-sm font-medium underline decoration-coral decoration-2 underline-offset-4">
             {open ? "Show less" : "Read the full abstract"}
           </button>
@@ -215,14 +223,26 @@ function Header({
   );
 }
 
-function SectionHeading({ section, concepts, originUrl }: { section: Section; concepts: string[]; originUrl: string }) {
+function SectionHeading({
+  section,
+  concepts,
+  originUrl,
+  macros,
+}: {
+  section: Section;
+  concepts: string[];
+  originUrl: string;
+  macros: Record<string, string>;
+}) {
   const depth = section.heading_path.length;
   const text = section.heading_path.at(-1) ?? section.id;
   const Tag = depth <= 1 ? "h2" : "h3";
   return (
     <div className="mb-5">
       <div className="flex items-start justify-between gap-4">
-        <Tag className={depth <= 1 ? "text-[1.75rem] font-semibold leading-tight tracking-tight" : "text-xl font-semibold leading-snug"}>{text}</Tag>
+        <Tag className={depth <= 1 ? "text-[1.75rem] font-semibold leading-tight tracking-tight" : "text-xl font-semibold leading-snug"}>
+          <MathText text={text} macros={macros} />
+        </Tag>
         <a href={originUrl} target="_blank" rel="noreferrer" className="mt-1 shrink-0 text-xs text-muted underline decoration-dotted underline-offset-4 hover:text-coral">
           In the paper
         </a>
@@ -232,7 +252,7 @@ function SectionHeading({ section, concepts, originUrl }: { section: Section; co
           {section.difficulty ? <Difficulty level={section.difficulty} /> : null}
           {concepts.slice(0, 4).map((c) => (
             <span key={c} className="pill bg-lavender-soft text-xs">
-              {c}
+              {plainText(c, macros)}
             </span>
           ))}
         </div>
@@ -374,7 +394,17 @@ function DisplayMath({ latex, macros }: { latex: string; macros: Record<string, 
   );
 }
 
-function Outline({ sections, active, withScenes }: { sections: Section[]; active: string | null; withScenes: Map<string, Scene[]> }) {
+function Outline({
+  sections,
+  active,
+  withScenes,
+  macros,
+}: {
+  sections: Section[];
+  active: string | null;
+  withScenes: Map<string, Scene[]>;
+  macros: Record<string, string>;
+}) {
   const ref = useRef<HTMLDivElement | null>(null);
   const index = active ? sections.findIndex((s) => s.id === active) : 0;
   const pct = sections.length ? ((index + 1) / sections.length) * 100 : 0;
@@ -395,7 +425,7 @@ function Outline({ sections, active, withScenes }: { sections: Section[]; active
             className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 transition-colors ${s.id === active ? "bg-ink text-paper" : "text-ink-soft hover:bg-wash"}`}
           >
             {withScenes.has(s.id) ? <span className="size-1.5 rounded-full bg-coral" aria-label="has visuals" /> : null}
-            {s.heading_path.at(-1)}
+            <MathText text={s.heading_path.at(-1) ?? s.id} macros={macros} />
           </a>
         ))}
       </div>

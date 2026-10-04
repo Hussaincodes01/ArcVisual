@@ -128,6 +128,14 @@ NEXT_PUBLIC_ARCVISUAL_API_BASE=http://localhost:8000 npm run dev
 | `/watch/[jobId]` | The waiting room. Drives the job, names the stages, lists visuals as they land, opens the article as soon as its text is ready. | client |
 | `/p/[slug]` | The article. Prose in the initial HTML (inline math typeset), sticky stage of live scenes, fills in place while a job is still running. | server + ISR |
 
+**Math is never shown as TeX source.** `reader/lib/tex.ts` and `components/MathText`
+typeset every `$…$` in prose, headings, claims and captions with KaTeX, using the
+paper's own macros (extracted at ingest into `paper.tex_macros`). Where KaTeX cannot
+go — diagram labels, the browser tab — or cannot parse something, the same code
+produces readable Unicode math (`√dₖ`, `∇ᵩℒ`). Every displayed equation also has a
+**Read it in words** toggle that reads it aloud in plain English, generated in the
+browser at no cost.
+
 The scene engine lives in `reader/lib/scenes` (plans: parameters → timeline, no DOM)
 and `reader/components/scenes` (renderers: a pure function of time). Each plan mirrors
 its Python template's `estimate_duration`, which is what keeps the captions — fitted

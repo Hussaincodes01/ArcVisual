@@ -12,6 +12,8 @@ fade. A hard swap between two equations teaches nothing.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import Field, field_validator, model_validator
 
 from arcvisual.storyboard import Archetype
@@ -88,6 +90,20 @@ def _looks_like_prose(step: str) -> bool:
     return len(words) >= 4
 
 
+def _wraps_math_in_a_sentence(step: str) -> bool:
+    """Words with `$…$` math inside them, where an equation belongs.
+
+    Observed on the live Transformer article: "for any fixed offset $k$,
+    $PE_{pos+k}$ can be represented as a linear function of $PE_{pos}$". It is not
+    a formula, so it cannot be typeset as one, and stripping its symbols left
+    readers a line of nonsense. Three or more real words outside the math marks it.
+    """
+    if "$" not in step:
+        return False
+    outside = re.sub(r"\$[^$]*\$", " ", step)
+    return len([w for w in outside.split() if len(w) >= 3 and w.isalpha()]) >= 3
+
+
 TEMPLATE_ID = "transform_chain"
 ARCHETYPE = Archetype.TRANSFORM_CHAIN
 
@@ -100,8 +116,10 @@ class Params(TemplateParams):
         # a seven-step derivation is still a derivation.
         description=(
             "LaTeX for each state of the derivation, in order. Copy the paper's "
-            "own notation verbatim; do not re-derive or re-typeset. Two to six "
-            "steps — a longer chain should be split into two scenes."
+            "own notation verbatim; do not re-derive or re-typeset. Each step is "
+            "an equation only: no $ signs and no words around it (explanations "
+            "belong in the captions). Two to six steps — a longer chain should be "
+            "split into two scenes."
         ),
     )
     highlight: list[str] = Field(
@@ -124,12 +142,13 @@ class Params(TemplateParams):
         # STRUCTURAL, so it rejects: a sentence cannot be coerced into the equation
         # it describes. The message is written for the repair prompt.
         for i, step in enumerate(steps):
-            if _looks_like_prose(step):
+            if _looks_like_prose(step) or _wraps_math_in_a_sentence(step):
                 raise ValueError(
                     f"step {i + 1} is an English sentence, not an equation: "
                     f"{step[:60]!r}. Every step must be LaTeX math copied from the "
-                    "paper, e.g. \\mathrm{softmax}(QK^T / \\sqrt{d_k})V. Put the "
-                    "explanation in the captions instead."
+                    "paper, with no $ signs and no surrounding words, e.g. "
+                    "\\mathrm{softmax}(QK^T / \\sqrt{d_k})V. Put the explanation in "
+                    "the captions instead."
                 )
         return steps
 

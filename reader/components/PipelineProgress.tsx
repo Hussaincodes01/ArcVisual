@@ -11,6 +11,7 @@
 import { formatElapsed, STAGES, type JobView } from "../hooks/useJobStatus";
 import type { JobStatus } from "../lib/types";
 import ArcLoader, { ArcDots } from "./ArcLoader";
+import { plainText } from "../lib/tex";
 
 interface Props extends JobView {
   title?: string;
@@ -56,7 +57,7 @@ export default function PipelineProgress({
           <div className="min-w-0">
             <span className="pill bg-mustard text-xs">{isTerminal ? "Done" : "Working on it"}</span>
             <h1 className="mt-4 text-[clamp(1.6rem,3.6vw,2.4rem)] font-semibold leading-tight tracking-tight">
-              {title ?? "Reading your paper"}
+              {title ? plainText(title) : "Reading your paper"}
             </h1>
           </div>
           <ArcLoader size={56} progress={isTerminal ? 1 : progress} />

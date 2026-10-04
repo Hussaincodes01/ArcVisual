@@ -8,6 +8,7 @@ import { notFound } from "next/navigation";
 import Article from "../../../components/Article";
 import SiteHeader from "../../../components/SiteHeader";
 import { fetchPaper } from "../../../lib/api";
+import { plainText } from "../../../lib/tex";
 import { schemaSupported } from "../../../lib/types";
 
 interface Props {
@@ -21,11 +22,13 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const data = await fetchPaper(slug).catch(() => null);
   if (!data) return { title: "Explainer not found" };
   const { paper } = data.storyboard;
-  const description = paper.abstract.slice(0, 200);
+  // Browser tabs and link previews cannot typeset math; show it readably instead.
+  const title = plainText(paper.title, paper.tex_macros);
+  const description = plainText(paper.abstract.slice(0, 200), paper.tex_macros);
   return {
-    title: paper.title,
+    title,
     description,
-    openGraph: { title: `${paper.title}, explained`, description, type: "article" },
+    openGraph: { title: `${title}, explained`, description, type: "article" },
   };
 }
 

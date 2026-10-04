@@ -299,7 +299,12 @@ function uniNode(n: Node): string {
       let out = base;
       if (n.sub) {
         const s = uni(n.sub);
-        out += scriptChars(s, "sub") ?? (s.length === 1 || /^\(.*\)$/.test(s) ? `_${s}` : `_(${s})`);
+        // Unicode has no subscript capitals (D_KL), so fall back to the lowercase
+        // forms, which read as a subscript, before resorting to an underscore.
+        out +=
+          scriptChars(s, "sub") ??
+          scriptChars(s.toLowerCase(), "sub") ??
+          (s.length === 1 || /^\(.*\)$/.test(s) ? `_${s}` : `_(${s})`);
       }
       if (n.sup) {
         const s = uni(n.sup);
@@ -358,6 +363,7 @@ export function toUnicode(tex: string, macros?: Record<string, string>): string 
       .replace(/([\p{L}\p{N}⁰-₟ᵢ-ᵪ)]) \(/gu, "$1(")
       .replace(/\s+([,.;)\]])/g, "$1")
       .replace(/([([])\s+/g, "$1")
+      .replace(/\|\|/g, "‖")
       .replace(/\s{2,}/g, " ")
       .trim();
   } catch {
@@ -544,6 +550,15 @@ function textOf(nodes: Node[]): string {
 }
 
 export function toWords(tex: string, macros?: Record<string, string>): string {
+  // Each line of a multi-line equation is its own sentence.
+  return tex
+    .split(/\\\\/)
+    .map((line) => lineToWords(line, macros))
+    .filter(Boolean)
+    .join(". ");
+}
+
+function lineToWords(tex: string, macros?: Record<string, string>): string {
   try {
     const out = words(prepare(tex, macros))
       .replace(/,\s*(equals|plus|minus|times|over|given)/g, " $1")
