@@ -7,8 +7,9 @@
 
 import type { ComponentType } from "react";
 import type { ScenePlan, SceneProps } from "../../lib/scenes/core";
-import { planArchitectureFlow, planPlotReveal, planTransformChain } from "../../lib/scenes/plans";
+import { planArchitectureFlow, planConceptDiagram, planPlotReveal, planTransformChain } from "../../lib/scenes/plans";
 import ArchitectureFlowScene from "./ArchitectureFlowScene";
+import ConceptDiagramScene from "./ConceptDiagramScene";
 import PlotRevealScene from "./PlotRevealScene";
 import TransformChainScene from "./TransformChainScene";
 
@@ -34,6 +35,11 @@ export const RENDERERS: Record<string, SceneRenderer> = {
     plan: planArchitectureFlow as SceneRenderer["plan"],
     Component: ArchitectureFlowScene as SceneRenderer["Component"],
     verb: "A system, assembled in order",
+  },
+  concept_diagram: {
+    plan: planConceptDiagram as SceneRenderer["plan"],
+    Component: ConceptDiagramScene as SceneRenderer["Component"],
+    verb: "An idea, drawn and set in motion",
   },
 };
 

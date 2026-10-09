@@ -34,6 +34,9 @@ class Archetype(str, Enum):
     TRANSFORM_CHAIN = "transform_chain"
     PLOT_REVEAL = "plot_reveal"
     ARCHITECTURE_FLOW = "architecture_flow"
+    #: A model-authored diagram: shapes, arrows and a step script. Client-renderable,
+    #: which is what lets a serverless deployment draw an idea rather than a formula.
+    CONCEPT_DIAGRAM = "concept_diagram"
     # Declared but unimplemented in Phase 1 — the registry gates availability.
     VECTOR_FIELD = "vector_field"
     GEOMETRIC_INTUITION = "geometric_intuition"

@@ -56,7 +56,15 @@ an animation.
 3. RESTRAINT IS THE JOB. Most sections deserve zero animations. A paper deserves \
 between 3 and 12 total. Rank by how hard an idea is to grasp from prose alone, \
 multiplied by how central it is to the paper's contribution. An analysis that \
-wants to animate everything has understood nothing.\
+wants to animate everything has understood nothing.
+
+4. DRAW THE MECHANISM, NOT THE NOTATION. An equation on screen, written out \
+again and animated, teaches nothing the printed equation did not. When an \
+equation matters, the animation should show what it DOES: the objects it acts on, \
+how data moves between them, what gets compared, weighted, summed or routed. \
+Prefer a drawn diagram of the idea over a re-typeset formula, and reserve \
+formula-by-formula derivations for the rare case where the algebraic steps \
+themselves are the insight.\
 """
 
 TASK = """\
@@ -84,9 +92,20 @@ Section ids you may reference:
 """
 
 _ARCHETYPE_HELP = {
+    "concept_diagram": (
+        "THE DEFAULT. A diagram you draw of how the idea works — the actual objects "
+        "(tokens, vectors, matrices, blocks, operators, distributions) placed on a "
+        "grid, connected by arrows, and animated step by step: parts appear, data "
+        "flows along a path, cells of a matrix light up, a label turns from "
+        "'scores' into 'weights'. Use it for mechanisms, architectures, algorithms, "
+        "attention/routing patterns, and for any equation whose meaning is a "
+        "process: draw what the equation does rather than writing it out"
+    ),
     "transform_chain": (
-        "an equation derived step by step; the reader needs to see what changes "
-        "between one line and the next"
+        "RARE. Only when the paper itself performs a multi-step derivation AND the "
+        "algebraic steps are the insight. Never for showing a single formula — a "
+        "formula re-typeset on screen is not an explanation; draw what it does "
+        "with concept_diagram instead"
     ),
     "plot_reveal": (
         "a results curve or comparison worth interrogating; the reader needs the "
@@ -97,22 +116,33 @@ _ARCHETYPE_HELP = {
         "data takes is the thing the static figure cannot show"
     ),
     "custom_scene": (
-        "ANY idea the three shapes above would misrepresent — a mechanism, a "
-        "counterexample, a geometric intuition, an attention pattern, a scaling "
-        "argument, an algorithm walking through its own data. A bespoke animation "
-        "is written for it. PREFER THIS over forcing an idea into a chain, a plot "
-        "or a box diagram it does not really fit: a diagram of the wrong shape "
-        "teaches the wrong thing, and three shapes cannot cover a whole field"
+        "an idea concept_diagram's vocabulary cannot express — continuous "
+        "geometry, a curve being deformed, a vector field, a counterexample that "
+        "needs real coordinates. A bespoke Manim animation is written for it. Do "
+        "not use it for anything a drawn diagram of parts, arrows and grids covers"
     ),
 }
 
 
+#: The order archetypes are described in. Models weigh what they read first, and the
+#: alphabetical order put a box diagram first and the drawn mechanism nowhere near it.
+_HELP_ORDER = (
+    "concept_diagram",
+    "custom_scene",
+    "architecture_flow",
+    "plot_reveal",
+    "transform_chain",
+)
+
+
 def archetype_help() -> str:
-    """Only the archetypes this build can actually render."""
-    lines = []
-    for arch in registry.available_archetypes():
-        lines.append(f"- {arch.value}: {_ARCHETYPE_HELP.get(arch.value, 'see template')}")
-    return "\n".join(lines)
+    """Only the archetypes this build can actually render, best-first."""
+    available = [a.value for a in registry.available_archetypes()]
+    ranked = sorted(
+        available,
+        key=lambda v: _HELP_ORDER.index(v) if v in _HELP_ORDER else len(_HELP_ORDER),
+    )
+    return "\n".join(f"- {v}: {_ARCHETYPE_HELP.get(v, 'see template')}" for v in ranked)
 
 
 # --------------------------------------------------------------------------- #
@@ -502,6 +532,45 @@ Return parameters matching the schema, plus `beats`: one beat per caption, each 
 with a `dur` of at least 0.8 seconds. Total runtime should land between 12 and \
 {max_runtime} seconds.\
 """
+
+#: Appended to the codegen system prompt for `concept_diagram` only. The schema says
+#: what each field is; this says what a GOOD diagram is, which no schema can.
+DIAGRAM_GUIDE = """\
+You are drawing a diagram that explains the idea, then scripting how it animates. \
+The reader should understand the mechanism by watching it, without reading a formula.
+
+DRAW THE OBJECTS THE IDEA IS ABOUT
+- Use the paper's own things and names: "Queries Q", "Keys K", "Expert 3", "Patch \
+embeddings", "Residual stream". Never "Input A" or "Component 1".
+- Pick the kind that matches what the thing IS: a sequence of words or patches is \
+`tokens`; a set of vectors is a `stack`; a pairwise matrix (attention, similarity, \
+a kernel) is a `grid`; a probability or weighting over options is `bars`; a \
+transformation is an `op` (×, +, ⊕, softmax, concat, ReLU); a learned component is \
+a `block`; a repeated or grouped region is a `container` spanning its members.
+- Notation goes in short labels as Unicode: QKᵀ, √dₖ, x₁…xₙ, ŷ, ∇L, ⊙. No LaTeX, \
+no dollar signs. At most ONE `text` element may hold a short formula fragment, as \
+an annotation beside the mechanism — never as the subject of the scene.
+- When the paper gives numbers (sizes, a weight pattern, a distribution), use them \
+in `values`; otherwise leave `values` empty rather than inventing data.
+
+LAYOUT ON THE GRID
+- Data flows left to right across columns 0-7; parallel streams use rows 0-5.
+- One element per grid cell. Give tall things a `row_span`, wide things a \
+`col_span`. A `container` may overlap the elements it groups.
+- 5-12 elements is the sweet spot. Fewer, larger elements read better than many.
+
+SCRIPT THE STEPS (3-7), ONE IDEA PER STEP
+- Build up in the order the mechanism works: inputs first, then each operation, \
+then the result. Use `show` to bring parts in when they become relevant.
+- Use `flow` to send a pulse along the path data takes — this is what a static \
+figure cannot show. Use `marks` to light up the specific cells or items that \
+matter (one row of an attention grid, the top-k experts, the selected token). \
+Use `relabel` when a thing changes meaning (scores → weights). Use `focus` to \
+point at the contribution.
+- Each step's `caption` is one plain sentence saying what is happening on screen \
+right now and why it matters. Your `beats` must repeat the step captions, one beat \
+per step, in order.
+"""  # noqa: RUF001
 
 REPAIR_TASK = """\
 The `{archetype}` scene you parameterised failed validation on attempt {attempt}.

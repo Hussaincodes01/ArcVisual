@@ -77,7 +77,11 @@ requires_render = pytest.mark.skipif(
 pytestmark = [pytest.mark.slow, requires_render]
 
 #: Templates whose text is Pango only. transform_chain needs LaTeX.
-_NO_LATEX_ARCHETYPES = (Archetype.ARCHITECTURE_FLOW, Archetype.PLOT_REVEAL)
+_NO_LATEX_ARCHETYPES = (
+    Archetype.ARCHITECTURE_FLOW,
+    Archetype.PLOT_REVEAL,
+    Archetype.CONCEPT_DIAGRAM,
+)
 
 
 @pytest.fixture(scope="module")

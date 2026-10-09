@@ -479,18 +479,32 @@ def triage(
 ) -> list[VisualOpportunity]:
     """Rank by ``difficulty x centrality`` and cut to the cap.
 
-    One extra rule beyond the plan's: at most two animations per section. A
+    Two extra rules beyond the plan's. At most two animations per section: a
     section with four proposals is a section the model found interesting, not one
-    the reader needs four videos for.
+    the reader needs four videos for. And at most ``max_formula_scenes`` formula
+    chains per paper: beyond that, a ``transform_chain`` proposal is re-cast as a
+    ``concept_diagram`` of the same claim, because an article that animates its
+    equations one after another explains none of them.
     """
     cfg = settings().budgets
     ranked = sorted(candidates, key=lambda o: (-o.rank, o.id))
     per_section: dict[str, int] = {}
     kept: list[VisualOpportunity] = []
+    formulas = 0
+    can_draw = registry.is_available(Archetype.CONCEPT_DIAGRAM)
     for o in ranked:
         sec = o.span.section_id
         if per_section.get(sec, 0) >= 2:
             continue
+        if o.archetype is Archetype.TRANSFORM_CHAIN:
+            # The cap on formula scenes. Past it, the claim survives — it was ranked
+            # high enough to be here — but it is drawn rather than re-typeset.
+            if formulas >= cfg.max_formula_scenes:
+                if not can_draw:
+                    continue
+                o = o.model_copy(update={"archetype": Archetype.CONCEPT_DIAGRAM})
+            else:
+                formulas += 1
         kept.append(o)
         per_section[sec] = per_section.get(sec, 0) + 1
         if len(kept) >= cfg.max_scenes:

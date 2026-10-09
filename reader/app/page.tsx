@@ -13,7 +13,7 @@ import SiteHeader, { Logo } from "../components/SiteHeader";
 import SubmitForm from "../components/SubmitForm";
 import { Blocks, Cloud, PaperSheet, Pencil, Sparkle } from "../components/art";
 import { fetchRecentPapers } from "../lib/api";
-import { ATTENTION_DEMO, RESNET_DEMO, TRANSFORMER_DEMO } from "../lib/demos";
+import { ATTENTION_DEMO, ATTENTION_DIAGRAM_DEMO, RESNET_DEMO, TRANSFORMER_DEMO } from "../lib/demos";
 
 export const revalidate = 120;
 
@@ -91,11 +91,11 @@ function Hero() {
             <Cloud className="absolute -right-12 bottom-24 z-0 hidden w-32 sm:block" />
             <div className="relative z-[5] -rotate-1">
               <SceneCard
-                archetype={ATTENTION_DEMO.archetype}
-                params={ATTENTION_DEMO.params}
-                beats={ATTENTION_DEMO.beats}
-                claim={ATTENTION_DEMO.claim}
-                source={`Drawn live in your browser, from ${ATTENTION_DEMO.source}`}
+                archetype={ATTENTION_DIAGRAM_DEMO.archetype}
+                params={ATTENTION_DIAGRAM_DEMO.params}
+                beats={ATTENTION_DIAGRAM_DEMO.beats}
+                claim={ATTENTION_DIAGRAM_DEMO.claim}
+                source={`Drawn live in your browser, from ${ATTENTION_DIAGRAM_DEMO.source}`}
                 autoplay="always"
                 loop
               />
@@ -255,6 +255,7 @@ function HowItWorks() {
 
 function Visuals() {
   const items = [
+    { demo: ATTENTION_DIAGRAM_DEMO, name: "Mechanisms", when: "When an idea is a process, it is drawn as one: the parts appear, data flows between them, and the cells that matter light up." },
     { demo: ATTENTION_DEMO, name: "Derivations", when: "When a paper walks through an equation, each step is written out and transformed into the next." },
     { demo: RESNET_DEMO, name: "Results", when: "When a figure carries the argument, the chart is built up so you see what changed and by how much." },
     { demo: TRANSFORMER_DEMO, name: "Systems", when: "When a model is a pipeline of parts, the blocks appear in order and data is traced through them." },
@@ -263,10 +264,10 @@ function Visuals() {
     <section id="visuals" className="scroll-mt-6 border-y-[1.5px] border-ink bg-lavender-soft">
       <div className="mx-auto max-w-7xl px-4 py-20 sm:px-6 lg:px-10 lg:py-28">
         <SectionHead
-          title="Three ways an idea can move"
+          title="Four ways an idea can move"
           aside="These run live in your browser, from the same kind of parameters the pipeline writes for a paper. Press play, drag the bar, or slow them down."
         />
-        <div className="mt-12 grid gap-6 lg:grid-cols-3">
+        <div className="mt-12 grid gap-6 md:grid-cols-2">
           {items.map(({ demo, name, when }) => (
             <div key={name} className="flex flex-col">
               <h3 className="text-2xl font-semibold tracking-tight">{name}</h3>

@@ -15,7 +15,7 @@ from functools import lru_cache
 #: Bumped whenever pipeline behaviour changes in a way that should produce a
 #: different article for the same paper. Part of the L3 cache key and of the
 #: (paper_id, pipeline_version) idempotency key on `jobs`.
-PIPELINE_VERSION = "0.2.0-serverless"
+PIPELINE_VERSION = "0.3.0-diagrams"
 
 #: Pinned render environment. Any change here invalidates every L2 artifact.
 MANIM_VERSION = "0.18.1"
@@ -33,6 +33,10 @@ class Budgets:
     job_cost_ceiling_usd: float = 8.00  # 2x target; a tripwire, not a target
     max_scenes: int = 12  # the triage cap
     min_scenes: int = 3
+    #: Formula-chain scenes per paper. A paper explained as a run of re-typeset
+    #: equations is the failure readers actually reported; past this cap, further
+    #: transform_chain proposals are re-cast as drawn diagrams of the same claim.
+    max_formula_scenes: int = 2
     # --- concurrency ---
     analyze_concurrency: int = 8  # Anthropic-bound, not CPU-bound
     render_max_containers: int = 12
@@ -321,6 +325,170 @@ class Groq:
 
 
 @dataclass(frozen=True)
+class LongContextPreset:
+    """One OpenAI-compatible host whose model can read a whole paper in one call.
+
+    Every value here is a default the operator can override with an ``LLM_*`` env var.
+    Model ids in particular are a snapshot: hosts rename and retire them, which is why
+    each one is a comma-separated fallback chain like Groq's.
+    """
+
+    base_url: str
+    key_env: str
+    classify: str
+    codegen: str
+    #: Smallest context window across the chain, so a prompt sized for it fits every
+    #: model the provider may fall back to.
+    context_tokens: int
+    #: Whether this host enforces ``response_format: json_schema`` with ``strict``.
+    #: False sends the schema in the prompt and validates client-side instead.
+    json_schema: bool
+    note: str = ""
+
+
+#: Hosts whose models take 100K-260K tokens in a single request, so ANALYZE reads the
+#: whole paper in one pass instead of the ~5,000 characters Groq's free tier allows.
+#:
+#: The distinction that matters is *usable* context, not advertised context. Groq's
+#: gpt-oss-120b has a 131,072-token window, but the free tier meters 8,000 tokens per
+#: minute with prompt and reply sharing it, so the paper is trimmed to 5,000 chars
+#: before the model ever sees it. Every preset below accepts a full paper (~20-40k
+#: tokens) in one request on the plan named in its note.
+LONG_CONTEXT_PRESETS: dict[str, LongContextPreset] = {
+    "openrouter": LongContextPreset(
+        base_url="https://openrouter.ai/api/v1",
+        key_env="OPENROUTER_API_KEY",
+        # qwen3-235b 2507 natively serves 262,144 tokens; the fallbacks serve 131,072.
+        classify="qwen/qwen3-235b-a22b-2507,deepseek/deepseek-v3.2,openai/gpt-oss-120b",
+        codegen="qwen/qwen3-235b-a22b-2507,openai/gpt-oss-120b,deepseek/deepseek-v3.2",
+        context_tokens=131072,
+        json_schema=True,
+        note="One key, many hosts. Append :free to a model id for the rate-limited free "
+        "endpoint (about 50 requests/day); free endpoints may serve less context.",
+    ),
+    "gemini": LongContextPreset(
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        key_env="GEMINI_API_KEY",
+        classify="gemini-flash-latest",
+        codegen="gemini-flash-latest",
+        # Flash serves ~1M tokens; budgeted at 262,144 because no paper needs more and
+        # a smaller prompt is faster and cheaper on every call.
+        context_tokens=262144,
+        json_schema=True,
+        note="Google AI Studio key, free tier with per-minute and per-day request caps.",
+    ),
+    "mistral": LongContextPreset(
+        base_url="https://api.mistral.ai/v1",
+        key_env="MISTRAL_API_KEY",
+        classify="mistral-medium-latest,mistral-small-latest",
+        codegen="mistral-medium-latest,mistral-small-latest",
+        context_tokens=131072,
+        json_schema=True,
+        note="Free Experiment plan (phone verification; requests may be used for "
+        "training).",
+    ),
+    "deepseek": LongContextPreset(
+        base_url="https://api.deepseek.com/v1",
+        key_env="DEEPSEEK_API_KEY",
+        classify="deepseek-v4-flash",
+        codegen="deepseek-v4-flash",
+        context_tokens=131072,
+        # DeepSeek documents json_object mode, not json_schema, so the schema is
+        # prompted and validated here rather than sent as a constraint.
+        json_schema=False,
+        note="Paid, very cheap per token; no free tier.",
+    ),
+    "cerebras": LongContextPreset(
+        base_url="https://api.cerebras.ai/v1",
+        key_env="CEREBRAS_API_KEY",
+        classify="gpt-oss-120b",
+        codegen="gpt-oss-120b",
+        context_tokens=131072,
+        json_schema=True,
+        note="131K context on paid plans; the free trial serves less.",
+    ),
+    "custom": LongContextPreset(
+        base_url="",
+        key_env="LLM_API_KEY",
+        classify="",
+        codegen="",
+        context_tokens=131072,
+        json_schema=False,
+        note="Any OpenAI-compatible endpoint: set LLM_BASE_URL and LLM_MODEL_*.",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class LongContext:
+    """An OpenAI-compatible provider sized by its context window, not by a TPM meter.
+
+    Selected with ``ARCVISUAL_PROVIDER=<preset>`` (``openrouter``, ``gemini``, ...) or
+    ``ARCVISUAL_PROVIDER=longcontext`` plus ``LLM_PRESET``.
+    """
+
+    preset: str = "openrouter"
+    api_key: str = ""
+    base_url: str = ""
+    classify: str = ""
+    codegen: str = ""
+    context_tokens: int = 131072
+    #: Output ceiling per call. Generous on purpose: reasoning models bill thinking as
+    #: output, and a concept diagram is a larger object than a template's params.
+    max_tokens: int = 16384
+    json_schema: bool = True
+    temperature: float = 0.2
+    timeout_s: float = 300.0
+    #: Sent as ``reasoning_effort`` when set; empty omits the parameter.
+    reasoning_effort: str = ""
+    rate_in: float | None = None
+    rate_out: float | None = None
+
+    def models_for(self, task: str) -> list[str]:
+        raw = {"classify": self.classify, "codegen": self.codegen}.get(
+            task, self.classify
+        )
+        return [m.strip() for m in raw.split(",") if m.strip()]
+
+    @property
+    def prompt_char_budget(self) -> int:
+        """Characters of paper body one request can carry.
+
+        The window has to hold the reply, the schema and the instructions as well as
+        the paper. ~3 characters per token is deliberately pessimistic: LaTeX-dense
+        prose tokenises worse than English, and over-estimating fails the request.
+        """
+        overhead_tokens = self.max_tokens + 8000
+        return max(20000, (self.context_tokens - overhead_tokens) * 3)
+
+
+def long_context_from_env(preset: str, env=os.environ.get) -> LongContext:
+    """Resolve a preset plus any ``LLM_*`` overrides into a :class:`LongContext`."""
+    name = (preset or "openrouter").strip().lower()
+    base = LONG_CONTEXT_PRESETS.get(name, LONG_CONTEXT_PRESETS["custom"])
+    flag = env("LLM_JSON_SCHEMA")
+    return LongContext(
+        preset=name,
+        api_key=env("LLM_API_KEY") or env(base.key_env, "") or "",
+        base_url=(env("LLM_BASE_URL") or base.base_url).rstrip("/"),
+        classify=env("LLM_MODEL_CLASSIFY") or base.classify,
+        codegen=env("LLM_MODEL_CODEGEN") or env("LLM_MODEL_CLASSIFY") or base.codegen,
+        context_tokens=int(env("LLM_CONTEXT_TOKENS") or base.context_tokens),
+        max_tokens=int(env("LLM_MAX_TOKENS") or LongContext.max_tokens),
+        json_schema=base.json_schema if flag is None or flag == "" else flag != "0",
+        temperature=float(env("LLM_TEMPERATURE") or 0.2),
+        timeout_s=float(env("LLM_TIMEOUT_S") or 300),
+        reasoning_effort=env("LLM_REASONING_EFFORT", "") or "",
+        rate_in=_opt_float(env("LLM_RATE_IN")),
+        rate_out=_opt_float(env("LLM_RATE_OUT")),
+    )
+
+
+#: Names ``ARCVISUAL_PROVIDER`` accepts for the long-context provider.
+LONG_CONTEXT_NAMES = ("longcontext", *LONG_CONTEXT_PRESETS)
+
+
+@dataclass(frozen=True)
 class Opencode:
     """The opencode agent CLI. See opencode.ai/docs/cli.
 
@@ -420,6 +588,7 @@ class Settings:
     poolside: Poolside = field(default_factory=Poolside)
     groq: Groq = field(default_factory=Groq)
     opencode: Opencode = field(default_factory=Opencode)
+    long_context: LongContext = field(default_factory=LongContext)
     render: Render = field(default_factory=Render)
 
     def provider_configured(self, name: str) -> bool:
@@ -434,6 +603,13 @@ class Settings:
             return bool(self.poolside.api_key)
         if name == "groq":
             return bool(self.groq.api_key)
+        if name in LONG_CONTEXT_NAMES:
+            lc = self.long_context
+            # A preset name asks for THAT host; "longcontext" takes whichever one
+            # settings() resolved.
+            if name != "longcontext" and name != lc.preset:
+                return False
+            return bool(lc.api_key and lc.base_url and lc.models_for("classify"))
         if name == "opencode":
             import shutil
 
@@ -459,7 +635,10 @@ class Settings:
             # opencode is excluded here to match registry.AUTO_PREFERENCE: having the
             # binary on PATH must not silently route the pipeline through an agent
             # whose cost we cannot attribute.
-            return not any(self.provider_configured(n) for n in ("anthropic", "poolside"))
+            return not any(
+                self.provider_configured(n)
+                for n in ("anthropic", "longcontext", "groq", "poolside")
+            )
         return not self.provider_configured(requested)
 
 
@@ -534,6 +713,7 @@ def settings() -> Settings:
         step_budget_s=int(env("ARCVISUAL_STEP_BUDGET_S", "200")),
         budgets=Budgets(
             scene_concurrency=int(env("ARCVISUAL_SCENE_CONCURRENCY", "4")),
+            max_formula_scenes=int(env("ARCVISUAL_MAX_FORMULA_SCENES", "2")),
         ),
         models=Models(
             classify=env("ANTHROPIC_MODEL_CLASSIFY", Models.classify),
@@ -585,7 +765,29 @@ def settings() -> Settings:
             attach=env("OPENCODE_ATTACH", ""),
             timeout_s=float(env("OPENCODE_TIMEOUT_S", "420")),
         ),
+        long_context=long_context_from_env(_long_context_preset(env), env),
     )
+
+
+def _long_context_preset(env=os.environ.get) -> str:
+    """Which long-context host this process should use.
+
+    An explicit ``ARCVISUAL_PROVIDER=gemini`` wins, then ``LLM_PRESET``, then — for
+    ``auto`` — the first preset whose own key is present, so dropping an
+    ``OPENROUTER_API_KEY`` into the environment is enough to use it.
+    """
+    requested = (env("ARCVISUAL_PROVIDER") or "auto").strip().lower()
+    if requested in LONG_CONTEXT_PRESETS:
+        return requested
+    named = (env("LLM_PRESET") or "").strip().lower()
+    if named:
+        return named
+    if env("LLM_BASE_URL"):
+        return "custom"
+    for name, preset in LONG_CONTEXT_PRESETS.items():
+        if name != "custom" and env(preset.key_env):
+            return name
+    return "openrouter"
 
 
 def _opt_float(value: str | None) -> float | None:
