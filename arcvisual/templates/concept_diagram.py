@@ -575,7 +575,16 @@ def _draw(scene, m, e: Element, box: tuple[float, float, float, float]):
                 ]
             ).arrange_in_grid(rows=n, cols=n, buff=side * 0.08)
             items = list(cells)
-            body = cells
+            body = m.VGroup(cells)
+            # `cells` label the grid's rows and columns (the tokens of an attention
+            # matrix), as the browser renderer draws them: across the top, down the
+            # left.
+            for i, name in enumerate(e.cells[:n]):
+                col = _label(scene, m, name, side * 1.1, SMALL_FONT, MUTED)
+                col.next_to(cells[i], m.UP, buff=0.08)
+                row = _label(scene, m, name, side * 1.1, SMALL_FONT, MUTED)
+                row.next_to(cells[i * n], m.LEFT, buff=0.1)
+                body.add(col, row)
         elif e.kind == "bars":
             bw = min(w / n * 0.7, 0.6)
             vals = e.values or [0.6] * n
