@@ -44,7 +44,7 @@ fields it owns. That rule is enforced by `assert_monotonic`, not by convention.
 | Ingest (arXiv → LaTeX → sections, equations, figures, licence) | working, 6-paper eval set |
 | Analyze (concepts, difficulty, visual opportunities, triage) | working; single-pass, heuristic fallback |
 | Providers (Anthropic · Poolside · opencode · heuristic) | working; selection, capabilities, cost attribution |
-| Templates (`transform_chain`, `plot_reveal`, `architecture_flow`) | 2 of 3 render and pass Gate 2; `transform_chain` needs LaTeX |
+| Templates (`concept_diagram`, `transform_chain`, `plot_reveal`, `architecture_flow`) | 3 of 4 render and pass Gates 2 and 3; `transform_chain` needs LaTeX |
 | Generate (schema filling → thin module) | working |
 | Gate 1 (parse, allowlist, security, params, lint) | working, ~100ms |
 | Gate 2 (sandboxed draft render) | working locally against real Manim 0.18.1 |
@@ -53,7 +53,7 @@ fields it owns. That rule is enforced by `assert_monotonic`, not by convention.
 | Repair ladder + budgets | working |
 | Persistence + metrics view | working; Postgres (Neon) in production |
 | Serverless deploy (Vercel API + Neon + Groq, stepped jobs) | **live** |
-| Browser scene renderer (all three templates) | **live**; mirrors each template's timeline |
+| Browser scene renderer (all four templates) | **live**; mirrors each template's timeline |
 | Reader — landing, waiting room, article | **live**, redesigned; renders real articles |
 | Modal deploy, R2 upload | written, undeployed (the optional video path) |
 
@@ -71,7 +71,7 @@ has been exercised in a real browser at desktop and phone widths. In the Manim p
 ```bash
 pip install -e ".[dev]"
 
-pytest                                  # 322 tests, no network, no key, no Manim
+pytest                                  # 364 tests, no network, no key, no Manim
 python -m eval.run --no-gate2           # the 6-paper eval set against real arXiv
 ruff check arcvisual eval tests
 ```
@@ -143,6 +143,22 @@ by the pipeline to the template's runtime — in step with the picture. Scenes a
 when scrolled into view, can be scrubbed, slowed or enlarged, and under
 `prefers-reduced-motion` show their final frame with an explicit play button.
 
+### Drawn diagrams, not re-typeset formulas
+
+`concept_diagram` is the default visual. The model *draws* the idea on a grid of
+column/row indices — `tokens`, `stack` (vectors), `grid` (a matrix whose cells light
+up), `bars` (a distribution), `op` (×, softmax, concat), `block`, `container` and a
+short `text` annotation — connects the parts with arrows, and scripts 3–7 steps: what
+appears, where a pulse flows, which cells light up, which label changes ("scores" →
+"weights"). The same parameters render in the browser
+(`reader/components/scenes/ConceptDiagramScene.tsx`) and in Manim
+(`arcvisual/templates/concept_diagram.py`), on one timeline held together by a test.
+
+The analyzer is told to draw the mechanism rather than the notation, and triage keeps
+at most `ARCVISUAL_MAX_FORMULA_SCENES` (default 2) `transform_chain` scenes per paper:
+past that, a formula proposal is re-cast as a diagram of the same claim instead of
+being written out on screen line by line.
+
 ---
 
 ## Deployment
@@ -199,9 +215,15 @@ changes: cached articles are keyed on it and will be rebuilt.
 
 **Cost.** Vercel Hobby, Neon free and Groq's free tier: $0 per month. The binding
 limit is Groq's daily token allowance, roughly 15–25 new papers a day per key;
-explained papers are cached forever and cost nothing to re-open. Switching
-`ARCVISUAL_PROVIDER=anthropic` (with credit on the key) buys deeper analysis — the whole
-paper in one pass, with prompt caching.
+explained papers are cached forever and cost nothing to re-open.
+
+**Groq's free tier is also what limits the visuals.** Its 8,000 tokens per minute
+cap ANALYZE at ~5,000 characters of a ~78,000-character paper, so the model proposes
+animations for whichever section it happened to see — usually its equations. Setting
+a long-context preset (below) sends the whole paper in one pass instead, with no
+other change: `ARCVISUAL_PROVIDER=openrouter` plus `OPENROUTER_API_KEY`, or
+`gemini` / `mistral` for a free tier. `ARCVISUAL_PROVIDER=anthropic` (with credit on
+the key) does the same with prompt caching.
 
 ### Database
 
@@ -275,12 +297,16 @@ surfaced rather than smoothed over — a cost figure is meaningless without them
 | Provider | Structured output | Prompt cache | Cost attribution | Keys |
 |---|---|---|---|---|
 | `anthropic` | native, constrained | yes, 1h TTL | exact, per-token | 1 |
+| long-context presets | strict schema, prompted fallback | no | from `LLM_RATE_IN`/`OUT` | 1 |
+| `groq` | native, constrained | no | from `GROQ_RATE_IN`/`OUT` | 1 |
 | `poolside` | prompted + validated | no | needs your contract rates | 1 |
 | `opencode` | prompted + validated | no | per-step, from its stream | 0 |
 | `heuristic` | n/a | n/a | genuinely free | 0 |
 
 ```bash
 ARCVISUAL_PROVIDER=anthropic   ANTHROPIC_API_KEY=sk-...
+ARCVISUAL_PROVIDER=openrouter  OPENROUTER_API_KEY=...   # or gemini, mistral, deepseek, cerebras
+ARCVISUAL_PROVIDER=groq        GROQ_API_KEY=...
 ARCVISUAL_PROVIDER=poolside    POOLSIDE_API_KEY=...
 ARCVISUAL_PROVIDER=opencode    # opencode auth login — it holds its own credentials
 ARCVISUAL_PROVIDER=heuristic   # no model at all; the CI default
@@ -306,6 +332,30 @@ Three decisions worth knowing:
 
 `ANTHROPIC_BASE_URL` routes the Anthropic provider through any compatible gateway
 (Dedalus Labs, a proxy). Same SDK, same model ids — a setting, not a fourth provider.
+
+### Long-context presets (100K–260K tokens per request)
+
+`arcvisual/providers/longcontext_provider.py` is one OpenAI-compatible provider with
+presets. Its prompt budget comes from the model's **context window**, not a
+per-minute meter, so ANALYZE reads the whole paper in one pass and codegen is given
+the full section a visual comes from (12,000 chars) instead of a 1,500-char quote.
+
+| Preset | Key | Default models (fallback chain) | Context | Plan |
+|---|---|---|---|---|
+| `openrouter` | `OPENROUTER_API_KEY` | `qwen/qwen3-235b-a22b-2507`, `deepseek/deepseek-v3.2`, `openai/gpt-oss-120b` | 131K–262K | paid per token; `:free` ids rate-limited |
+| `gemini` | `GEMINI_API_KEY` | `gemini-flash-latest` | ~1M (budgeted 262K) | AI Studio free tier |
+| `mistral` | `MISTRAL_API_KEY` | `mistral-medium-latest`, `mistral-small-latest` | 131K | free Experiment plan |
+| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` | 131K+ | paid, very cheap |
+| `cerebras` | `CEREBRAS_API_KEY` | `gpt-oss-120b` | 131K | paid (trial serves less) |
+| `custom` | `LLM_API_KEY` + `LLM_BASE_URL` | `LLM_MODEL_CLASSIFY` | `LLM_CONTEXT_TOKENS` | any OpenAI-compatible host |
+
+Model ids and free-tier terms are a snapshot (October 2026) and hosts change them
+without notice: override with `LLM_MODEL_CLASSIFY` / `LLM_MODEL_CODEGEN`, and a retired
+id falls through to the next in the chain. Strict `json_schema` is used where the host
+supports it; a host that refuses the schema (Gemini rejects some shapes with 400) or
+silently ignores it (an OpenRouter upstream) falls back to the prompted path for that
+call rather than failing it. OpenRouter requests carry `require_parameters` so they
+are only routed to upstreams that honour the schema.
 
 ### Operational notes, measured rather than assumed
 

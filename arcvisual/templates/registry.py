@@ -29,6 +29,7 @@ _TEMPLATE_MODULES = (
     "arcvisual.templates.transform_chain",
     "arcvisual.templates.plot_reveal",
     "arcvisual.templates.architecture_flow",
+    "arcvisual.templates.concept_diagram",
     # Registered last, and deliberately registered at all: without it the analyzer
     # never offers `custom_scene` as a choice, and every paper is forced into one of
     # the three fixed shapes above — which is exactly how a reader ends up watching
@@ -126,6 +127,7 @@ CLIENT_RENDERABLE = frozenset(
         Archetype.TRANSFORM_CHAIN,
         Archetype.PLOT_REVEAL,
         Archetype.ARCHITECTURE_FLOW,
+        Archetype.CONCEPT_DIAGRAM,
     }
 )
 

@@ -25,6 +25,7 @@ from typing import Any
 from arcvisual.analyze.prompts import (
     CODEGEN_SYSTEM,
     CODEGEN_TASK,
+    DIAGRAM_GUIDE,
     REPAIR_TASK,
     ParamsOut,
     build_prompt,
@@ -245,7 +246,13 @@ def generate_scene(
     # model's durations are advisory and its caption COUNT is what matters. Without
     # this, Gate 2's +/-20% duration assertion fires on every scene and tells us
     # nothing about real drift.
-    beats = fit_beats([b.caption for b in beats], template.estimate_duration(params_obj))
+    #
+    # A template whose params carry their own narration (concept_diagram's steps)
+    # supplies the captions too, so the text under the stage is the text the scene
+    # was scripted around rather than a parallel list that may have drifted from it.
+    captions_for = getattr(template.module, "captions_for", None)
+    captions = captions_for(params_obj) if captions_for else [b.caption for b in beats]
+    beats = fit_beats(captions, template.estimate_duration(params_obj))
     spec = _spec(opportunity, params_obj.model_dump(mode="json"), beats, scrubbable)
     source = render_module(spec, params_obj)
     scene = Scene(spec=spec, state=SceneState.VALIDATING, attempts=attempt)
@@ -362,6 +369,11 @@ def _call_provider(
     system_blocks = [
         *prefix,
         TextBlock(text=CODEGEN_SYSTEM),
+        *(
+            [TextBlock(text=DIAGRAM_GUIDE)]
+            if opportunity.archetype is Archetype.CONCEPT_DIAGRAM
+            else []
+        ),
         TextBlock(
             text="The parameter schema you must fill:\n"
             + json.dumps(template.param_schema(), indent=2)
@@ -376,6 +388,15 @@ def _call_provider(
         equations="\n".join(f"  {eq}" for eq in equations[:6]),
         max_runtime=int(cfg.render.max_runtime_s),
     )
+    if _reads_long_context(caps) and not caps.prompt_cache:
+        # A provider that can hold the whole paper can certainly hold this section.
+        # The quote says WHAT to show; the section around it says what the parts
+        # are called, how they connect and what numbers the paper gives — which is
+        # what a drawing needs and a 1,500-character quote usually lacks.
+        user += (
+            "\n\nThe full section this comes from, for context (names, structure "
+            f'and numbers to draw from):\n"""\n{section.raw[:_SECTION_CONTEXT_CHARS]}\n"""'
+        )
     if findings:
         user += "\n\n" + REPAIR_TASK.format(
             archetype=opportunity.archetype.value,
@@ -401,6 +422,18 @@ def _call_provider(
         )
 
     return parsed.params, _beats_from(parsed), bool(parsed.scrubbable), result.usage
+
+
+#: Characters of the opportunity's section sent to codegen on a long-context provider.
+_SECTION_CONTEXT_CHARS = 12000
+
+#: Below this prompt budget a provider is metered too tightly to spare the section.
+_LONG_CONTEXT_CHARS = 60000
+
+
+def _reads_long_context(caps: Any) -> bool:
+    budget = getattr(caps, "prompt_char_budget", None)
+    return budget is not None and budget >= _LONG_CONTEXT_CHARS
 
 
 def _beats_from(parsed: ParamsOut) -> list[Beat]:
@@ -482,6 +515,58 @@ def heuristic_params(
             "takeaway": None,
         }
         captions = ["The reported trend, drawn as it forms.", "The final figure."]
+
+    elif arch == "concept_diagram":
+        # The offline stand-in can only draw the section's shape, not its idea —
+        # but it must be a VALID diagram so the browser path, Gate 1 and the render
+        # tests exercise this template without a key.
+        heading = section.heading[:40] or "Method"
+        eqs = [e.latex for e in sb.equations if e.span.section_id == section.id]
+        params = {
+            "title": heading,
+            "elements": [
+                {
+                    "id": "x",
+                    "kind": "tokens",
+                    "label": "Input",
+                    "column": 0,
+                    "cells": ["x₁", "x₂", "x₃"],
+                    "tone": "input",
+                },
+                {
+                    "id": "core",
+                    "kind": "block",
+                    "label": heading,
+                    "column": 1,
+                    "col_span": 2,
+                    "tone": "accent",
+                    "note": f"{len(eqs)} equation(s) in this section" if eqs else "",
+                },
+                {
+                    "id": "y",
+                    "kind": "stack",
+                    "label": "Output",
+                    "column": 3,
+                    "cells": ["y₁", "y₂", "y₃"],
+                    "tone": "output",
+                },
+            ],
+            "connections": [{"src": "x", "dst": "core"}, {"src": "core", "dst": "y"}],
+            "steps": [
+                {"caption": "The input arrives as a sequence.", "show": ["x"]},
+                {
+                    "caption": f"The paper's {heading.lower()} transforms it.",
+                    "show": ["core"],
+                    "focus": ["core"],
+                },
+                {
+                    "caption": "Follow one example through to the output.",
+                    "show": ["y"],
+                    "flow": ["x", "core", "y"],
+                },
+            ],
+        }
+        captions = [st["caption"] for st in params["steps"]]
 
     else:  # architecture_flow
         params = {

@@ -106,6 +106,10 @@ class OpenAICompatProvider:
         """
         return "max_tokens"
 
+    def _extra_payload(self, response_format: dict | None) -> dict[str, Any]:
+        """Host-specific request fields, merged into every chat payload."""
+        return {}
+
     def _token_budget(self, model: str = "") -> TokenBudget | None:
         """A per-minute token meter shared across this provider's callers, or None.
 
@@ -349,6 +353,7 @@ class OpenAICompatProvider:
             payload["reasoning_effort"] = effort
         if response_format is not None:
             payload["response_format"] = response_format
+        payload.update(self._extra_payload(response_format))
 
         reserved = 0
         if meter is not None:

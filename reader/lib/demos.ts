@@ -10,12 +10,13 @@
 
 import type { Beat } from "./types";
 import { MIN_BEAT_S } from "./scenes/core";
-import { planArchitectureFlow, planPlotReveal, planTransformChain } from "./scenes/plans";
+import { planArchitectureFlow, planConceptDiagram, planPlotReveal, planTransformChain } from "./scenes/plans";
 
 const PLANS: Record<string, (p: Record<string, unknown>) => { duration: number } | null> = {
   transform_chain: planTransformChain,
   plot_reveal: planPlotReveal,
   architecture_flow: planArchitectureFlow,
+  concept_diagram: planConceptDiagram,
 };
 
 export interface DemoScene {
@@ -125,4 +126,231 @@ export const TRANSFORMER_DEMO = scene(
   ],
 );
 
-export const DEMOS = [ATTENTION_DEMO, RESNET_DEMO, TRANSFORMER_DEMO];
+/**
+ * The same idea as ATTENTION_DEMO, drawn as the mechanism instead of the formula:
+ * queries meet keys, the score grid lights up, softmax turns a row into weights,
+ * and the weights mix the values. This is what `concept_diagram` is for.
+ */
+export const ATTENTION_DIAGRAM_DEMO = scene(
+  "concept_diagram",
+  "Each query is scored against every key; softmax turns the scores into weights that mix the values.",
+  "Attention Is All You Need · §3.2.1",
+  {
+    "title": "Scaled dot-product attention",
+    "elements": [
+      {
+        "id": "q",
+        "kind": "stack",
+        "label": "Queries Q",
+        "column": 0,
+        "row": 0,
+        "cells": [
+          "q₁",
+          "q₂",
+          "q₃"
+        ],
+        "tone": "input"
+      },
+      {
+        "id": "k",
+        "kind": "stack",
+        "label": "Keys K",
+        "column": 0,
+        "row": 1,
+        "cells": [
+          "k₁",
+          "k₂",
+          "k₃"
+        ],
+        "tone": "input"
+      },
+      {
+        "id": "dot",
+        "kind": "op",
+        "label": "QKᵀ",
+        "column": 1,
+        "row": 0,
+        "row_span": 2
+      },
+      {
+        "id": "scores",
+        "kind": "grid",
+        "label": "scores",
+        "column": 2,
+        "row": 0,
+        "row_span": 2,
+        "size": 3,
+        "values": [
+          2.1,
+          0.3,
+          0.2,
+          0.4,
+          1.8,
+          0.9,
+          0.1,
+          0.6,
+          2.4
+        ],
+        "note": "n × n"
+      },
+      {
+        "id": "sm",
+        "kind": "op",
+        "label": "softmax",
+        "column": 3,
+        "row": 0,
+        "row_span": 2,
+        "tone": "accent"
+      },
+      {
+        "id": "w",
+        "kind": "bars",
+        "label": "weights for q₁",
+        "column": 4,
+        "row": 0,
+        "cells": [
+          "v₁",
+          "v₂",
+          "v₃"
+        ],
+        "values": [
+          0.78,
+          0.13,
+          0.09
+        ],
+        "tone": "accent"
+      },
+      {
+        "id": "v",
+        "kind": "stack",
+        "label": "Values V",
+        "column": 4,
+        "row": 1,
+        "cells": [
+          "v₁",
+          "v₂",
+          "v₃"
+        ],
+        "tone": "input"
+      },
+      {
+        "id": "out",
+        "kind": "block",
+        "label": "Output",
+        "note": "weighted sum of V",
+        "column": 5,
+        "row": 0,
+        "row_span": 2,
+        "tone": "output"
+      }
+    ],
+    "connections": [
+      {
+        "src": "q",
+        "dst": "dot"
+      },
+      {
+        "src": "k",
+        "dst": "dot"
+      },
+      {
+        "src": "dot",
+        "dst": "scores",
+        "label": "÷ √dₖ"
+      },
+      {
+        "src": "scores",
+        "dst": "sm"
+      },
+      {
+        "src": "sm",
+        "dst": "w"
+      },
+      {
+        "src": "w",
+        "dst": "out"
+      },
+      {
+        "src": "v",
+        "dst": "out"
+      }
+    ],
+    "steps": [
+      {
+        "caption": "Every token brings a query and a key.",
+        "show": [
+          "q",
+          "k"
+        ]
+      },
+      {
+        "caption": "Each query is compared with every key by a dot product.",
+        "show": [
+          "dot",
+          "scores"
+        ],
+        "flow": [
+          "q",
+          "dot",
+          "scores"
+        ]
+      },
+      {
+        "caption": "Row 1 holds how well q₁ matches each key.",
+        "marks": [
+          {
+            "target": "scores",
+            "item": 0,
+            "col": 0
+          },
+          {
+            "target": "scores",
+            "item": 0,
+            "col": 1
+          },
+          {
+            "target": "scores",
+            "item": 0,
+            "col": 2
+          }
+        ]
+      },
+      {
+        "caption": "Softmax turns that row into weights that sum to one.",
+        "show": [
+          "sm",
+          "w"
+        ],
+        "flow": [
+          "scores",
+          "sm",
+          "w"
+        ],
+        "marks": [
+          {
+            "target": "w",
+            "item": 0,
+            "col": 0
+          }
+        ]
+      },
+      {
+        "caption": "The output is the values mixed by those weights.",
+        "show": [
+          "v",
+          "out"
+        ],
+        "flow": [
+          "w",
+          "out"
+        ],
+        "focus": [
+          "out"
+        ]
+      }
+    ]
+  },
+  ["Every token brings a query and a key.", "Each query is compared with every key by a dot product.", "Row 1 holds how well q₁ matches each key.", "Softmax turns that row into weights that sum to one.", "The output is the values mixed by those weights."],
+);
+
+export const DEMOS = [ATTENTION_DIAGRAM_DEMO, ATTENTION_DEMO, RESNET_DEMO, TRANSFORMER_DEMO];

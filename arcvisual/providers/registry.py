@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from arcvisual.config import settings
+from arcvisual.config import LONG_CONTEXT_NAMES, settings
 from arcvisual.providers.base import (
     Capabilities,
     Provider,
@@ -25,7 +25,7 @@ from arcvisual.providers.base import (
 log = logging.getLogger(__name__)
 
 #: Every provider that can be constructed by name.
-PROVIDERS = ("anthropic", "groq", "poolside", "opencode")
+PROVIDERS = ("anthropic", "groq", "poolside", "opencode", *LONG_CONTEXT_NAMES)
 
 #: What ``auto`` will actually pick, most capable first. Anthropic leads because it is
 #: the only backend with constrained output, a prompt cache and real cost attribution.
@@ -34,10 +34,13 @@ PROVIDERS = ("anthropic", "groq", "poolside", "opencode")
 #: billing happens against its own credentials, so ArcVisual cannot attribute cost, and
 #: merely having the binary on PATH should not silently route a whole pipeline through
 #: it. Choosing it is a decision, so it requires ``ARCVISUAL_PROVIDER=opencode``.
-#: Groq sits second: it has constrained decoding like Anthropic, and is the
-#: fastest and cheapest way to get a reliable typed object. Poolside follows because
-#: it needs the prompted-JSON ladder and is far slower per call.
-AUTO_PREFERENCE = ("anthropic", "groq", "poolside")
+#: The long-context hosts sit second: they read the whole paper in one request,
+#: which is the difference between an analysis of the paper and an analysis of
+#: whichever 5,000 characters fit Groq's free-tier minute. Groq follows: it has
+#: constrained decoding and is the fastest way to get a reliable typed object, but
+#: its per-minute meter starves ANALYZE of context. Poolside follows because it
+#: needs the prompted-JSON ladder and is far slower per call.
+AUTO_PREFERENCE = ("anthropic", "longcontext", "groq", "poolside")
 
 
 def _build(name: str) -> Provider:
@@ -57,6 +60,15 @@ def _build(name: str) -> Provider:
         from arcvisual.providers.opencode_provider import OpencodeProvider
 
         return OpencodeProvider()
+    if name in LONG_CONTEXT_NAMES:
+        from arcvisual.providers.longcontext_provider import LongContextProvider
+
+        cfg = settings().long_context
+        if name != "longcontext" and name != cfg.preset:
+            from arcvisual.config import long_context_from_env
+
+            cfg = long_context_from_env(name)
+        return LongContextProvider(cfg=cfg)
     raise ValueError(
         f"unknown provider {name!r}; available: {', '.join(PROVIDERS)} (or 'auto')"
     )
@@ -65,7 +77,7 @@ def _build(name: str) -> Provider:
 def available() -> list[str]:
     """Providers that could actually be constructed here."""
     found = []
-    for name in PROVIDERS:
+    for name in ("anthropic", "groq", "poolside", "opencode", "longcontext"):
         try:
             _build(name)
         except (ProviderNotConfigured, ImportError):
