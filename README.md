@@ -357,8 +357,18 @@ silently ignores it (an OpenRouter upstream) falls back to the prompted path for
 call rather than failing it. OpenRouter requests carry `require_parameters` so they
 are only routed to upstreams that honour the schema.
 
-On OpenRouter the Nemotron free endpoint leads the chain and is asked to reason
-(`reasoning: {"enabled": true}`; `LLM_REASONING=0` turns it off). Every pipeline call
+On OpenRouter the Nemotron free endpoint leads the chain. It reasons while drawing
+diagrams (`reasoning: {"enabled": true}`; `LLM_REASONING=0` turns it off) but not while
+analysing the paper, unless `LLM_REASONING_ANALYZE=1`. Measured on the free endpoint
+(~86 tokens/s), the same analysis took 112 s with reasoning and 30 s without, and the
+real one with reasoning ran past Vercel's 300 s function limit.
+
+Every call is streamed and stopped at a wall-clock limit (`LLM_CALL_TIMEOUT_S`,
+default 120 s, and never past the end of the current step). A plain read timeout
+can't bound it: OpenRouter keeps a slow request alive with periodic bytes. A free
+model that misses the limit hands over to the next model in the chain. If analysis
+attempts keep dying without recording a failure, the job is failed after three
+tries rather than retried forever. Every pipeline call
 is a single turn, so there are no `reasoning_details` to pass back. A free host that
 cannot enforce the schema answers 404 under `require_parameters`; that call falls
 back to prompted JSON on the same model. If the free endpoint is withdrawn, the call

@@ -100,6 +100,12 @@ def advance(
     try:
         if provider is None:
             provider = _select_provider()
+        set_deadline = getattr(provider, "set_deadline", None)
+        if set_deadline is not None:
+            # Model calls may run into the grace period a started scene gets, and no
+            # further: past it the platform kills the function mid-call, and a killed
+            # call never reaches the error handling that would record it.
+            set_deadline(deadline + ATTEMPT_GRACE_S)
         while time.monotonic() < deadline:
             with sf() as session:
                 job = session.get(Job, job_id)
@@ -235,12 +241,35 @@ def _step_analyze(sf, job_id, provider, deadline: float | None = None) -> bool:
         job = session.get(Job, job_id)
         sb = Storyboard.model_validate(job.storyboard)
         attempts = int((job.stage_progress or {}).get("analyze_attempts") or 0) + 1
-        job.stage_progress = {
-            **(job.stage_progress or {}),
-            "stage": "analyzing",
-            "analyze_attempts": attempts,
-        }
-        session.commit()
+        if attempts <= MAX_ANALYZE_ATTEMPTS:
+            job.stage_progress = {
+                **(job.stage_progress or {}),
+                "stage": "analyzing",
+                "analyze_attempts": attempts,
+            }
+            session.commit()
+
+    if attempts > MAX_ANALYZE_ATTEMPTS:
+        # Every earlier attempt was counted on entry, yet none was failed on its way
+        # out — so each one died with its function, killed by the platform mid-call.
+        # Retrying would die the same way, forever: this is how a job sat in
+        # "analyzing" for 83 minutes.
+        _fail(
+            sf,
+            job_id,
+            {
+                "code": "analyze_timeout",
+                "message": (
+                    f"{attempts - 1} analyze attempts ended without finishing; each "
+                    "ran past the platform's function time limit"
+                ),
+                "user_facing": (
+                    "Reading this paper took longer than we are allowed to run. This "
+                    "is on us, not the paper — please try again later."
+                ),
+            },
+        )
+        return False
 
     before = sb.model_copy(deep=True) if cfg.strict_ownership else None
     t0 = time.perf_counter()

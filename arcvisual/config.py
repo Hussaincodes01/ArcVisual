@@ -453,9 +453,22 @@ class LongContext:
     timeout_s: float = 300.0
     #: Sent as ``reasoning_effort`` when set; empty omits the parameter.
     reasoning_effort: str = ""
-    #: OpenRouter only: send ``reasoning: {"enabled": true}``. A reasoning model plans
-    #: the layout of a diagram before writing it, which is the hard part of the job.
+    #: OpenRouter only: send ``reasoning: {"enabled": true}`` on CODEGEN calls. A
+    #: reasoning model plans the layout of a diagram before writing it, which is the
+    #: hard part of the job.
     reasoning: bool = False
+    #: Also reason during ANALYZE. Off by default: measured on the free Nemotron
+    #: endpoint (~86 tokens/s), a 67k-character analysis took 112s with reasoning
+    #: (7,272 reasoning tokens) and 30s without — and the real one, with a schema and
+    #: up to 40 concepts, ran past Vercel's 300s function limit every time.
+    reasoning_analyze: bool = False
+    #: Wall-clock ceiling on one model call, in seconds. A read timeout cannot bound
+    #: it: OpenRouter keeps a slow non-streaming request alive with periodic bytes, so
+    #: a call outlived the serverless function and was killed instead of failing.
+    call_timeout_s: float = 120.0
+    #: Concepts to ask ANALYZE for. Bounds the reply, and with it the call's duration;
+    #: twelve covers the twelve-scene cap.
+    analysis_item_budget: int = 12
     rate_in: float | None = None
     rate_out: float | None = None
 
@@ -495,6 +508,11 @@ def long_context_from_env(preset: str, env=os.environ.get) -> LongContext:
         timeout_s=float(env("LLM_TIMEOUT_S") or 300),
         reasoning_effort=env("LLM_REASONING_EFFORT", "") or "",
         reasoning=_flag(env("LLM_REASONING"), base.reasoning),
+        reasoning_analyze=_flag(env("LLM_REASONING_ANALYZE"), False),
+        call_timeout_s=float(env("LLM_CALL_TIMEOUT_S") or LongContext.call_timeout_s),
+        analysis_item_budget=int(
+            env("LLM_ANALYSIS_ITEMS") or LongContext.analysis_item_budget
+        ),
         rate_in=_opt_float(env("LLM_RATE_IN")),
         rate_out=_opt_float(env("LLM_RATE_OUT")),
     )
