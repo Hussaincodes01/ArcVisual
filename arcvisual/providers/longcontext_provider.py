@@ -27,6 +27,7 @@ Two things are deliberately conservative:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel
@@ -124,6 +125,14 @@ class LongContextProvider(OpenAICompatProvider):
             # OpenRouter may pick one that silently ignores the schema.
             extra["provider"] = {"require_parameters": True}
         return extra
+
+    def _model_exhausted(self, model: str, body: str) -> None:
+        # OpenRouter caps ':free' models per day ("Rate limit exceeded:
+        # free-models-per-day", ~50 requests without credits). Retrying cannot clear
+        # that until tomorrow, and failing the call would never reach the paid models
+        # behind it in the chain — so the free model is reported spent instead.
+        if model.endswith(":free") and re.search(r"per[- ]day", body, re.IGNORECASE):
+            raise ModelUnavailable(model, "free-model daily quota exhausted")
 
     def supports_json_schema(self, model: str = "") -> bool:
         return self._cfg.json_schema

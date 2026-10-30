@@ -322,3 +322,36 @@ def test_a_withdrawn_free_endpoint_falls_through_to_the_next_model(
         system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
     )
     assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+
+
+FREE_DAILY_QUOTA = _Resp(
+    429,
+    '{"error":{"message":"Rate limit exceeded: free-models-per-day. Add 10 credits '
+    'to unlock 1000 free model requests per day","code":429}}',
+)
+
+
+def test_a_spent_free_quota_falls_through_to_the_paid_model(reset_settings) -> None:
+    """Retrying a daily cap cannot succeed until tomorrow; the paid models behind the
+    free one are the only way the paper still gets explained today."""
+    http = _Http(FREE_DAILY_QUOTA, _ok('{"answer": "ok"}'))
+    provider = _provider(reset_settings, http)
+    result = provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+    # Remembered for the rest of the process: the next call skips the spent model.
+    assert provider.model_for(Task.CLASSIFY) == "qwen/qwen3-235b-a22b-2507"
+
+
+def test_a_paid_models_daily_limit_is_not_mistaken_for_a_free_quota(
+    reset_settings,
+) -> None:
+    from arcvisual.providers.base import ProviderError
+
+    http = _Http(_Resp(429, '{"error":{"message":"tokens per day (TPD): Limit 1"}}'))
+    provider = _provider(reset_settings, http, LLM_MODEL_CODEGEN="paid/model")
+    with pytest.raises(ProviderError, match="daily token quota"):
+        provider.structured(
+            system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+        )

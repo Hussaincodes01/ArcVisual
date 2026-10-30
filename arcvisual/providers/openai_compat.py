@@ -110,6 +110,10 @@ class OpenAICompatProvider:
         """Host-specific request fields, merged into every chat payload."""
         return {}
 
+    def _model_exhausted(self, model: str, body: str) -> None:
+        """Raise :class:`ModelUnavailable` if a 429 body means `model` is spent for
+        the day, so the next configured model is tried. No-op by default."""
+
     def _token_budget(self, model: str = "") -> TokenBudget | None:
         """A per-minute token meter shared across this provider's callers, or None.
 
@@ -370,6 +374,11 @@ class OpenAICompatProvider:
 
         if meter is not None:
             meter.observe(response.headers)
+
+        if response.status_code == 429:
+            # A host may know that this 429 means the MODEL is out of quota rather
+            # than the moment; it raises ModelUnavailable so the chain moves on.
+            self._model_exhausted(model, response.text)
 
         if response.status_code == 429 and is_daily_limit(response.text):
             if meter is not None:
