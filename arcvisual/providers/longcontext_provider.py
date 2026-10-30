@@ -26,8 +26,11 @@ Two things are deliberately conservative:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import threading
+import time
 from typing import Any
 
 from pydantic import BaseModel
@@ -38,6 +41,7 @@ from arcvisual.providers.base import (
     ModelUnavailable,
     ProviderError,
     ProviderNotConfigured,
+    RetryableProviderError,
     StructuredResult,
     Task,
     TextBlock,
@@ -54,6 +58,9 @@ log = logging.getLogger(__name__)
 
 #: Model ids the server reported as gone, per process — shared across scene lanes.
 _UNAVAILABLE: set[str] = set()
+
+#: Below this many seconds left there is no point starting a call: it cannot finish.
+_MIN_CALL_S = 10.0
 
 
 class LongContextProvider(OpenAICompatProvider):
@@ -82,6 +89,10 @@ class LongContextProvider(OpenAICompatProvider):
                 )
         self._cfg = cfg
         self._http = client
+        #: time.monotonic() instant no call may run past; None = only call_timeout_s.
+        self._deadline: float | None = None
+        #: The task of the call in flight, per thread (scene lanes share a provider).
+        self._local = threading.local()
         # Reports read "openrouter" or "gemini", not a generic label: a cost anomaly
         # is investigated per host.
         self.name = cfg.preset if cfg.preset in LONG_CONTEXT_PRESETS else "longcontext"
@@ -116,7 +127,7 @@ class LongContextProvider(OpenAICompatProvider):
         if self._cfg.preset != "openrouter":
             return {}
         extra: dict[str, Any] = {}
-        if self._cfg.reasoning:
+        if self._reasons():
             # Every call here is a single turn, so there is no `reasoning_details` to
             # pass back: the model reasons, answers, and the next call starts fresh.
             extra["reasoning"] = {"enabled": True}
@@ -125,6 +136,91 @@ class LongContextProvider(OpenAICompatProvider):
             # OpenRouter may pick one that silently ignores the schema.
             extra["provider"] = {"require_parameters": True}
         return extra
+
+    def _reasons(self) -> bool:
+        """Reason on this call? Diagrams yes; analysis only when asked for."""
+        if not self._cfg.reasoning:
+            return False
+        task = getattr(self._local, "task", None)
+        return task is not Task.CLASSIFY or self._cfg.reasoning_analyze
+
+    def set_deadline(self, deadline: float | None) -> None:
+        """No model call may run past this ``time.monotonic()`` instant.
+
+        The stepped deployment calls this with the end of its step: a call still
+        running when the platform kills the function never reaches an error handler,
+        so the job re-runs the same doomed call on every step, forever.
+        """
+        self._deadline = deadline
+
+    def _call_budget(self) -> float:
+        budget = self._cfg.call_timeout_s
+        if self._deadline is not None:
+            budget = min(budget, self._deadline - time.monotonic())
+        return budget
+
+    def _post(self, payload: dict[str, Any]) -> Any:
+        """Stream the reply and stop at a wall-clock budget.
+
+        Non-streaming is unboundable here: OpenRouter answers 200 at once and keeps
+        the connection alive with periodic bytes until the model finishes, so the
+        HTTP read timeout never fires. Streaming yields a line at a time, and the
+        clock is checked on each one.
+        """
+        model = payload.get("model", "")
+        budget = self._call_budget()
+        if budget < _MIN_CALL_S:
+            # Not retryable within this step: a retry would start with even less.
+            raise ProviderError(
+                f"{self.name}: only {max(budget, 0):.0f}s left in this step, too "
+                "little for another model call; the next step continues"
+            )
+        client = self._client()
+        if not hasattr(client, "stream"):
+            return client.post("/chat/completions", json=payload)
+        started = time.monotonic()
+        with client.stream(
+            "POST", "/chat/completions", json={**payload, "stream": True}
+        ) as response:
+            if response.status_code != 200:
+                response.read()
+                return response
+            content: list[str] = []
+            finish = None
+            usage: dict[str, Any] | None = None
+            for line in response.iter_lines():
+                if time.monotonic() - started > budget:
+                    self._too_slow(model, budget)
+                if not line.startswith("data:"):
+                    continue  # SSE comments are OpenRouter's keep-alives
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                chunk = json.loads(data)
+                if "error" in chunk:
+                    error = chunk["error"] or {}
+                    code = error.get("code")
+                    return _Reply(code if isinstance(code, int) else 502, chunk)
+                usage = chunk.get("usage") or usage
+                for choice in chunk.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    if delta.get("content"):
+                        content.append(delta["content"])
+                    finish = choice.get("finish_reason") or finish
+        message = {"content": "".join(content) if content else None}
+        return _Reply(
+            200,
+            {"choices": [{"message": message, "finish_reason": finish}], "usage": usage},
+        )
+
+    def _too_slow(self, model: str, budget: float) -> None:
+        if model.endswith(":free"):
+            # A free endpoint this slow now is no faster on the next attempt; the
+            # paid models behind it in the chain are the way to finish in time.
+            raise ModelUnavailable(model, f"no complete answer within {budget:.0f}s")
+        raise RetryableProviderError(
+            f"{self.name}: {model} gave no complete answer within {budget:.0f}s"
+        )
 
     def _model_exhausted(self, model: str, body: str) -> None:
         # OpenRouter caps ':free' models per day ("Rate limit exceeded:
@@ -160,6 +256,7 @@ class LongContextProvider(OpenAICompatProvider):
         max_tokens: int,
         max_attempts: int,
     ) -> StructuredResult:
+        self._local.task = task
         budget = self._budget(max_tokens, model, task.value)
         schema_key = (model, output_model.__name__, _schema_digest(output_model))
         first: StructuredResult | None = None
@@ -223,7 +320,7 @@ class LongContextProvider(OpenAICompatProvider):
             vision=False,
             cost_attributed=attributed,
             prompt_char_budget=self._cfg.prompt_char_budget,
-            analysis_item_budget=None,
+            analysis_item_budget=self._cfg.analysis_item_budget or None,
             analysis_passes=1,
             note=(
                 f"{self.model_for(Task.CLASSIFY)} for analyze / "
@@ -235,7 +332,12 @@ class LongContextProvider(OpenAICompatProvider):
                     if self._cfg.json_schema
                     else "JSON prompted and validated client-side. "
                 )
-                + ("Reasoning enabled. " if self._cfg.reasoning else "")
+                + (
+                    "Reasoning enabled for diagrams"
+                    + (" and analysis. " if self._cfg.reasoning_analyze else ". ")
+                    if self._cfg.reasoning
+                    else ""
+                )
                 + (preset.note + " " if preset and preset.note else "")
                 + (
                     "Cost attributed from LLM_RATE_IN/OUT."
@@ -283,3 +385,16 @@ def _is_schema_refusal(exc: ProviderError) -> bool:
     return any(f"returned {code}" in text for code in (400, 422)) or (
         "invalid JSON schema" in text
     )
+
+
+class _Reply:
+    """A response assembled from a stream, shaped like the httpx one `_chat` reads."""
+
+    def __init__(self, status_code: int, body: dict[str, Any]) -> None:
+        self.status_code = status_code
+        self._body = body
+        self.text = json.dumps(body)
+        self.headers: dict[str, str] = {}
+
+    def json(self) -> dict[str, Any]:
+        return self._body

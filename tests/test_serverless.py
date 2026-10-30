@@ -477,3 +477,55 @@ def test_one_failed_pass_does_not_lose_the_others() -> None:
     assert calls["n"] == len(groups)
     assert len(out.concepts) == len(groups) - 1
     assert any("passes" in n for n in report.notes)
+
+
+# -- an attempt killed by the platform -------------------------------------- #
+
+
+def test_analyze_attempts_killed_mid_call_fail_the_job_instead_of_looping(api) -> None:
+    """A real job sat in "analyzing" for 83 minutes: each attempt outran the 300s
+    function limit and was killed, so no error handler ever ran and every advance
+    started the same doomed call again. Counted on entry, the attempts give it away."""
+    from arcvisual.render import stepper
+
+    job_id = api.post("/api/jobs", json={"url": URL}).json()["job_id"]
+    sf = repo.session_factory()
+    stepper._step_ingest(sf, job_id)
+    with sf() as s:
+        job = s.get(Job, job_id)
+        assert job.state == "analyzing"
+        # Three attempts counted on entry, none of them recorded as failed.
+        job.stage_progress = {
+            **(job.stage_progress or {}),
+            "analyze_attempts": stepper.MAX_ANALYZE_ATTEMPTS,
+        }
+        s.commit()
+
+    assert stepper._step_analyze(sf, job_id, None) is False
+    with sf() as s:
+        job = s.get(Job, job_id)
+        assert job.state == "failed"
+        assert job.failure["code"] == "analyze_timeout"
+        assert "try again" in job.failure["user_facing"]
+
+
+def test_each_step_bounds_the_providers_model_calls(api, monkeypatch) -> None:
+    from arcvisual.render import stepper
+
+    seen: list[float] = []
+
+    class _Provider:
+        name = "stub"
+
+        def set_deadline(self, deadline: float) -> None:
+            seen.append(deadline)
+
+    monkeypatch.setattr(stepper, "_select_provider", lambda: _Provider())
+    job_id = api.post("/api/jobs", json={"url": URL}).json()["job_id"]
+    import time
+
+    before = time.monotonic()
+    stepper.advance(job_id, session_factory=repo.session_factory(), budget_s=0)
+    assert seen, "the provider was never told when the step ends"
+    # The step's end plus the grace a started scene gets — and no more.
+    assert seen[0] <= before + 1 + stepper.ATTEMPT_GRACE_S

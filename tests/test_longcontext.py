@@ -140,7 +140,8 @@ def test_the_whole_paper_fits_in_one_analyze_pass(reset_settings) -> None:
     caps = provider.capabilities()
     assert caps.prompt_char_budget >= 200_000
     assert caps.analysis_passes == 1
-    assert caps.analysis_item_budget is None
+    # Bounded, so the reply (and with it the call) fits inside one serverless step.
+    assert caps.analysis_item_budget == 12
     assert caps.prompt_char_budget > settings().groq.prompt_char_budget * 20
 
 
@@ -268,6 +269,24 @@ def test_openrouter_leads_with_nemotron_and_asks_it_to_reason(reset_settings) ->
     assert http.sent[0]["reasoning"] == {"enabled": True}
 
 
+def test_analysis_does_not_reason_unless_asked(reset_settings) -> None:
+    """Measured on the free endpoint: 112s with reasoning, 30s without, for the same
+    analysis. With reasoning the real one outran the 300s function limit."""
+    http = _Http(_ok('{"answer": "ok"}'), _ok('{"answer": "ok"}'))
+    provider = _provider(reset_settings, http)
+    provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CLASSIFY
+    )
+    assert "reasoning" not in http.sent[0]
+
+    http = _Http(_ok('{"answer": "ok"}'))
+    provider = _provider(reset_settings, http, LLM_REASONING_ANALYZE="1")
+    provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CLASSIFY
+    )
+    assert http.sent[0]["reasoning"] == {"enabled": True}
+
+
 def test_reasoning_can_be_turned_off(reset_settings) -> None:
     http = _Http(_ok('{"answer": "ok"}'))
     provider = _provider(reset_settings, http, LLM_REASONING="0")
@@ -355,3 +374,139 @@ def test_a_paid_models_daily_limit_is_not_mistaken_for_a_free_quota(
         provider.structured(
             system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
         )
+
+
+# --------------------------------------------------------------------------- #
+# A call must end before the function does
+# --------------------------------------------------------------------------- #
+
+
+class _Stream:
+    """An httpx streaming response: SSE lines, optionally slow."""
+
+    def __init__(self, lines: list[str], status: int = 200, delay_s: float = 0.0):
+        self.status_code = status
+        self.headers: dict = {}
+        self._lines = lines
+        self._delay = delay_s
+        self.text = "\n".join(lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self.text.encode()
+
+    def json(self):
+        return json.loads(self.text)
+
+    def iter_lines(self):
+        import time
+
+        for line in self._lines:
+            if self._delay:
+                time.sleep(self._delay)
+            yield line
+
+
+class _StreamingHttp:
+    def __init__(self, *streams: _Stream):
+        self.streams = list(streams)
+        self.sent: list[dict] = []
+
+    def stream(self, method: str, path: str, json: dict):
+        self.sent.append(json)
+        return self.streams.pop(0)
+
+
+def _sse(content: str) -> list[str]:
+    chunks = [content[i : i + 5] for i in range(0, len(content), 5)]
+    lines = [": OPENROUTER PROCESSING"]
+    for c in chunks:
+        lines.append("data: " + json.dumps({"choices": [{"delta": {"content": c}}]}))
+    lines.append(
+        "data: "
+        + json.dumps(
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+            }
+        )
+    )
+    lines.append("data: [DONE]")
+    return lines
+
+
+def test_a_streamed_reply_is_assembled_and_billed(reset_settings) -> None:
+    http = _StreamingHttp(_Stream(_sse('{"answer": "ok"}')))
+    provider = _provider(reset_settings, http)
+    result = provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert result.ok and result.value.answer == "ok"
+    assert http.sent[0]["stream"] is True
+    assert result.usage.input_tokens == 7 and result.usage.output_tokens == 3
+
+
+def test_a_too_slow_free_model_hands_over_to_the_next(reset_settings) -> None:
+    """The failure that stalled a real job for 83 minutes: a slow call ran past the
+    function limit. Bounded by wall clock, it now ends in time, and a free model that
+    slow is passed over for the paid one behind it."""
+    slow = _Stream(_sse('{"answer": "too late"}'), delay_s=0.05)
+    fast = _Stream(_sse('{"answer": "ok"}'))
+    http = _StreamingHttp(slow, fast)
+    provider = _provider(
+        reset_settings, http, LLM_CALL_TIMEOUT_S="0.1", LLM_JSON_SCHEMA="0"
+    )
+    import arcvisual.providers.longcontext_provider as lc
+
+    old, lc._MIN_CALL_S = lc._MIN_CALL_S, 0.0
+    try:
+        result = provider.structured(
+            system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+        )
+    finally:
+        lc._MIN_CALL_S = old
+    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+
+
+def test_no_call_starts_when_the_step_is_out_of_time(reset_settings) -> None:
+    import time
+
+    from arcvisual.providers.base import ProviderError, RetryableProviderError
+
+    http = _StreamingHttp(_Stream(_sse('{"answer": "ok"}')))
+    provider = _provider(reset_settings, http)
+    provider.set_deadline(time.monotonic() + 1.0)
+    with pytest.raises(ProviderError, match="too little for another model call") as info:
+        provider.structured(
+            system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+        )
+    # Not retryable: a retry would start with even less time.
+    assert not isinstance(info.value, RetryableProviderError)
+    assert http.sent == []
+
+
+def test_an_error_inside_the_stream_is_reported_with_its_status(reset_settings) -> None:
+    quota = _Stream(
+        [
+            "data: "
+            + json.dumps(
+                {
+                    "error": {
+                        "code": 429,
+                        "message": "Rate limit exceeded: free-models-per-day",
+                    }
+                }
+            )
+        ]
+    )
+    http = _StreamingHttp(quota, _Stream(_sse('{"answer": "ok"}')))
+    provider = _provider(reset_settings, http, LLM_JSON_SCHEMA="0")
+    result = provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
