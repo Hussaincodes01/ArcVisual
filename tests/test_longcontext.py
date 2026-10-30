@@ -382,14 +382,31 @@ def test_a_paid_models_daily_limit_is_not_mistaken_for_a_free_quota(
 
 
 class _Stream:
-    """An httpx streaming response: SSE lines, optionally slow."""
+    """An httpx streaming response: SSE lines, optionally slow, optionally stalled.
 
-    def __init__(self, lines: list[str], status: int = 200, delay_s: float = 0.0):
+    ``stall_s`` blocks before the first line the way a silent host does; like a
+    real socket, the block ends early when the stream is closed from elsewhere.
+    """
+
+    def __init__(
+        self,
+        lines: list[str],
+        status: int = 200,
+        delay_s: float = 0.0,
+        stall_s: float = 0.0,
+    ):
+        import threading
+
         self.status_code = status
         self.headers: dict = {}
         self._lines = lines
         self._delay = delay_s
+        self._stall = stall_s
+        self._closed = threading.Event()
         self.text = "\n".join(lines)
+
+    def close(self):
+        self._closed.set()
 
     def __enter__(self):
         return self
@@ -406,6 +423,8 @@ class _Stream:
     def iter_lines(self):
         import time
 
+        if self._stall and self._closed.wait(self._stall):
+            raise OSError("stream closed while reading")
         for line in self._lines:
             if self._delay:
                 time.sleep(self._delay)
@@ -510,3 +529,49 @@ def test_an_error_inside_the_stream_is_reported_with_its_status(reset_settings) 
         system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
     )
     assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+
+
+def test_a_silent_stream_is_cut_off_at_the_budget(reset_settings) -> None:
+    """A host that accepts the request and then sends nothing blocks the read
+    itself; the elapsed check between lines never runs. The watchdog closes the
+    stream at the budget instead of waiting out the 300s read timeout."""
+    import time
+
+    import arcvisual.providers.longcontext_provider as lc
+
+    stalled = _Stream(_sse('{"answer": "never"}'), stall_s=30)
+    http = _StreamingHttp(stalled, _Stream(_sse('{"answer": "ok"}')))
+    provider = _provider(
+        reset_settings, http, LLM_CALL_TIMEOUT_S="0.3", LLM_JSON_SCHEMA="0"
+    )
+    old, lc._MIN_CALL_S = lc._MIN_CALL_S, 0.0
+    started = time.monotonic()
+    try:
+        result = provider.structured(
+            system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+        )
+    finally:
+        lc._MIN_CALL_S = old
+    assert time.monotonic() - started < 5, "the stalled read was not cut off"
+    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+
+
+def test_openrouter_streams_ask_for_usage(reset_settings) -> None:
+    """Usage on an OpenRouter stream is opt-in; without it a call bills as zero."""
+    http = _StreamingHttp(_Stream(_sse('{"answer": "ok"}')))
+    provider = _provider(reset_settings, http)
+    provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert http.sent[0]["stream_options"] == {"include_usage": True}
+
+
+def test_other_hosts_are_not_sent_openrouter_stream_options(reset_settings) -> None:
+    from arcvisual.providers.longcontext_provider import LongContextProvider
+
+    reset_settings(ARCVISUAL_PROVIDER="mistral", MISTRAL_API_KEY="k")
+    http = _StreamingHttp(_Stream(_sse('{"answer": "ok"}')))
+    LongContextProvider(client=http).structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert "stream_options" not in http.sent[0]

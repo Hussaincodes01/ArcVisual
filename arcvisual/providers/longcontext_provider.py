@@ -178,18 +178,43 @@ class LongContextProvider(OpenAICompatProvider):
         client = self._client()
         if not hasattr(client, "stream"):
             return client.post("/chat/completions", json=payload)
-        started = time.monotonic()
-        with client.stream(
-            "POST", "/chat/completions", json={**payload, "stream": True}
-        ) as response:
+        body: dict[str, Any] = {**payload, "stream": True}
+        if self._cfg.preset == "openrouter":
+            # Usage on a stream is opt-in there, and without it a call is billed as
+            # zero tokens: the job's dollar ceiling would never trip. Other hosts
+            # (Mistral) reject unknown request fields, so this is not sent to them.
+            body["stream_options"] = {"include_usage": True}
+        with client.stream("POST", "/chat/completions", json=body) as response:
             if response.status_code != 200:
                 response.read()
                 return response
-            content: list[str] = []
-            finish = None
-            usage: dict[str, Any] | None = None
+            # The elapsed check below runs between lines, so it cannot end a stream
+            # that has gone silent: one blocked read would wait out the HTTP read
+            # timeout (300s) — past the function's own limit. The watchdog closes
+            # the stream at the budget, which unblocks that read.
+            expired = threading.Event()
+
+            def _expire() -> None:
+                expired.set()
+                response.close()
+
+            watchdog = threading.Timer(budget, _expire)
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                return self._read_stream(response, model, budget, expired)
+            finally:
+                watchdog.cancel()
+
+    def _read_stream(
+        self, response: Any, model: str, budget: float, expired: threading.Event
+    ) -> _Reply:
+        content: list[str] = []
+        finish = None
+        usage: dict[str, Any] | None = None
+        try:
             for line in response.iter_lines():
-                if time.monotonic() - started > budget:
+                if expired.is_set():
                     self._too_slow(model, budget)
                 if not line.startswith("data:"):
                     continue  # SSE comments are OpenRouter's keep-alives
@@ -207,6 +232,15 @@ class LongContextProvider(OpenAICompatProvider):
                     if delta.get("content"):
                         content.append(delta["content"])
                     finish = choice.get("finish_reason") or finish
+        except ProviderError:
+            raise
+        except Exception:
+            if expired.is_set():
+                # The watchdog closed the stream mid-read.
+                self._too_slow(model, budget)
+            raise
+        if expired.is_set():
+            self._too_slow(model, budget)
         message = {"content": "".join(content) if content else None}
         return _Reply(
             200,
