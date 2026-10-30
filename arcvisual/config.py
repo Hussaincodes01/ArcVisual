@@ -344,6 +344,8 @@ class LongContextPreset:
     #: False sends the schema in the prompt and validates client-side instead.
     json_schema: bool
     note: str = ""
+    #: Ask the host to reason before answering (OpenRouter's `reasoning.enabled`).
+    reasoning: bool = False
 
 
 #: Hosts whose models take 100K-260K tokens in a single request, so ANALYZE reads the
@@ -358,13 +360,23 @@ LONG_CONTEXT_PRESETS: dict[str, LongContextPreset] = {
     "openrouter": LongContextPreset(
         base_url="https://openrouter.ai/api/v1",
         key_env="OPENROUTER_API_KEY",
-        # qwen3-235b 2507 natively serves 262,144 tokens; the fallbacks serve 131,072.
-        classify="qwen/qwen3-235b-a22b-2507,deepseek/deepseek-v3.2,openai/gpt-oss-120b",
-        codegen="qwen/qwen3-235b-a22b-2507,openai/gpt-oss-120b,deepseek/deepseek-v3.2",
+        # NVIDIA Nemotron 3.5 Lightning (free endpoint) leads both chains: it is the
+        # model chosen for drawing diagrams of concepts. A free endpoint is rate-limited
+        # and can be withdrawn, so the paid long-context models follow it. qwen3-235b
+        # 2507 natively serves 262,144 tokens; the others are budgeted at 131,072.
+        classify=(
+            "nvidia/nemotron-3.5-lightning:free,qwen/qwen3-235b-a22b-2507,"
+            "deepseek/deepseek-v3.2,openai/gpt-oss-120b"
+        ),
+        codegen=(
+            "nvidia/nemotron-3.5-lightning:free,qwen/qwen3-235b-a22b-2507,"
+            "openai/gpt-oss-120b,deepseek/deepseek-v3.2"
+        ),
         context_tokens=131072,
         json_schema=True,
-        note="One key, many hosts. Append :free to a model id for the rate-limited free "
-        "endpoint (about 50 requests/day); free endpoints may serve less context.",
+        reasoning=True,
+        note="One key, many hosts. ':free' ids are rate-limited (about 50 requests/"
+        "day) and may serve less context than the paid endpoint.",
     ),
     "gemini": LongContextPreset(
         base_url="https://generativelanguage.googleapis.com/v1beta/openai",
@@ -441,6 +453,9 @@ class LongContext:
     timeout_s: float = 300.0
     #: Sent as ``reasoning_effort`` when set; empty omits the parameter.
     reasoning_effort: str = ""
+    #: OpenRouter only: send ``reasoning: {"enabled": true}``. A reasoning model plans
+    #: the layout of a diagram before writing it, which is the hard part of the job.
+    reasoning: bool = False
     rate_in: float | None = None
     rate_out: float | None = None
 
@@ -479,6 +494,7 @@ def long_context_from_env(preset: str, env=os.environ.get) -> LongContext:
         temperature=float(env("LLM_TEMPERATURE") or 0.2),
         timeout_s=float(env("LLM_TIMEOUT_S") or 300),
         reasoning_effort=env("LLM_REASONING_EFFORT", "") or "",
+        reasoning=_flag(env("LLM_REASONING"), base.reasoning),
         rate_in=_opt_float(env("LLM_RATE_IN")),
         rate_out=_opt_float(env("LLM_RATE_OUT")),
     )
@@ -788,6 +804,13 @@ def _long_context_preset(env=os.environ.get) -> str:
         if name != "custom" and env(preset.key_env):
             return name
     return "openrouter"
+
+
+def _flag(value: str | None, default: bool) -> bool:
+    """An on/off env var: unset or empty keeps the default, "0"/"false"/"off" is off."""
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() not in ("0", "false", "off", "no")
 
 
 def _opt_float(value: str | None) -> float | None:

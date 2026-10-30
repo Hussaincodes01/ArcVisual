@@ -27,6 +27,7 @@ Two things are deliberately conservative:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel
@@ -112,11 +113,26 @@ class LongContextProvider(OpenAICompatProvider):
         return self._cfg.reasoning_effort
 
     def _extra_payload(self, response_format: dict | None) -> dict[str, Any]:
-        if self._cfg.preset == "openrouter" and response_format is not None:
+        if self._cfg.preset != "openrouter":
+            return {}
+        extra: dict[str, Any] = {}
+        if self._cfg.reasoning:
+            # Every call here is a single turn, so there is no `reasoning_details` to
+            # pass back: the model reasons, answers, and the next call starts fresh.
+            extra["reasoning"] = {"enabled": True}
+        if response_format is not None:
             # Route only to upstream hosts that honour `response_format`. Without it
             # OpenRouter may pick one that silently ignores the schema.
-            return {"provider": {"require_parameters": True}}
-        return {}
+            extra["provider"] = {"require_parameters": True}
+        return extra
+
+    def _model_exhausted(self, model: str, body: str) -> None:
+        # OpenRouter caps ':free' models per day ("Rate limit exceeded:
+        # free-models-per-day", ~50 requests without credits). Retrying cannot clear
+        # that until tomorrow, and failing the call would never reach the paid models
+        # behind it in the chain — so the free model is reported spent instead.
+        if model.endswith(":free") and re.search(r"per[- ]day", body, re.IGNORECASE):
+            raise ModelUnavailable(model, "free-model daily quota exhausted")
 
     def supports_json_schema(self, model: str = "") -> bool:
         return self._cfg.json_schema
@@ -170,15 +186,24 @@ class LongContextProvider(OpenAICompatProvider):
         def send(system_text: str, user_text: str) -> tuple[str, Usage]:
             return self._chat(model, system_text, user_text, budget)
 
-        result = prompted_structured(
-            send=send,
-            system=system,
-            user=user,
-            output_model=output_model,
-            provider=self.name,
-            model=model,
-            max_attempts=max_attempts,
-        )
+        try:
+            result = prompted_structured(
+                send=send,
+                system=system,
+                user=user,
+                output_model=output_model,
+                provider=self.name,
+                model=model,
+                max_attempts=max_attempts,
+            )
+        except ProviderError as exc:
+            # Without `response_format` there is no parameter to route around, so
+            # OpenRouter's "No endpoints found" means the model itself has no live
+            # host — a withdrawn ':free' endpoint. That is the one failure where the
+            # next model in the chain is the right answer.
+            if "returned 404" in str(exc) and "No endpoints found" in str(exc):
+                raise ModelUnavailable(model, str(exc)[:200]) from exc
+            raise
         if first is not None:
             # The failed constrained attempt was still billed.
             result.usage = first.usage.merge(result.usage)
@@ -210,6 +235,7 @@ class LongContextProvider(OpenAICompatProvider):
                     if self._cfg.json_schema
                     else "JSON prompted and validated client-side. "
                 )
+                + ("Reasoning enabled. " if self._cfg.reasoning else "")
                 + (preset.note + " " if preset and preset.note else "")
                 + (
                     "Cost attributed from LLM_RATE_IN/OUT."
@@ -249,6 +275,11 @@ def _is_schema_refusal(exc: ProviderError) -> bool:
     if isinstance(exc, ModelUnavailable):
         return False  # the id is gone; the caller moves to the next model
     text = str(exc)
+    # OpenRouter with `require_parameters` answers 404 "No endpoints found that can
+    # handle the requested parameters" when no host serving this model supports
+    # `response_format` — common on free endpoints. Prompted JSON still works there.
+    if "returned 404" in text and "No endpoints found" in text:
+        return True
     return any(f"returned {code}" in text for code in (400, 422)) or (
         "invalid JSON schema" in text
     )

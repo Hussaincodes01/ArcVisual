@@ -342,7 +342,7 @@ the full section a visual comes from (12,000 chars) instead of a 1,500-char quot
 
 | Preset | Key | Default models (fallback chain) | Context | Plan |
 |---|---|---|---|---|
-| `openrouter` | `OPENROUTER_API_KEY` | `qwen/qwen3-235b-a22b-2507`, `deepseek/deepseek-v3.2`, `openai/gpt-oss-120b` | 131K–262K | paid per token; `:free` ids rate-limited |
+| `openrouter` | `OPENROUTER_API_KEY` | `nvidia/nemotron-3.5-lightning:free` (reasoning on), then `qwen/qwen3-235b-a22b-2507`, `deepseek/deepseek-v3.2`, `openai/gpt-oss-120b` | 131K–262K | Nemotron free endpoint first; paid fallbacks |
 | `gemini` | `GEMINI_API_KEY` | `gemini-flash-latest` | ~1M (budgeted 262K) | AI Studio free tier |
 | `mistral` | `MISTRAL_API_KEY` | `mistral-medium-latest`, `mistral-small-latest` | 131K | free Experiment plan |
 | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` | 131K+ | paid, very cheap |
@@ -356,6 +356,13 @@ supports it; a host that refuses the schema (Gemini rejects some shapes with 400
 silently ignores it (an OpenRouter upstream) falls back to the prompted path for that
 call rather than failing it. OpenRouter requests carry `require_parameters` so they
 are only routed to upstreams that honour the schema.
+
+On OpenRouter the Nemotron free endpoint leads the chain and is asked to reason
+(`reasoning: {"enabled": true}`; `LLM_REASONING=0` turns it off). Every pipeline call
+is a single turn, so there are no `reasoning_details` to pass back. A free host that
+cannot enforce the schema answers 404 under `require_parameters`; that call falls
+back to prompted JSON on the same model. If the free endpoint is withdrawn, the call
+moves on to the next model in the chain.
 
 ### Operational notes, measured rather than assumed
 

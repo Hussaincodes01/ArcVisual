@@ -249,3 +249,109 @@ def test_cost_is_unattributed_until_rates_are_set(reset_settings) -> None:
     )
     assert result.usage.attributed is True
     assert result.usage.cost_usd == pytest.approx((100 * 1.0 + 20 * 2.0) / 1e6)
+
+
+# --------------------------------------------------------------------------- #
+# Nemotron on OpenRouter's free endpoint
+# --------------------------------------------------------------------------- #
+
+
+def test_openrouter_leads_with_nemotron_and_asks_it_to_reason(reset_settings) -> None:
+    http = _Http(_ok('{"answer": "ok"}'))
+    provider = _provider(reset_settings, http)
+    assert provider.model_for(Task.CODEGEN) == "nvidia/nemotron-3.5-lightning:free"
+    assert provider.model_for(Task.CLASSIFY) == "nvidia/nemotron-3.5-lightning:free"
+    provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert http.sent[0]["model"] == "nvidia/nemotron-3.5-lightning:free"
+    assert http.sent[0]["reasoning"] == {"enabled": True}
+
+
+def test_reasoning_can_be_turned_off(reset_settings) -> None:
+    http = _Http(_ok('{"answer": "ok"}'))
+    provider = _provider(reset_settings, http, LLM_REASONING="0")
+    provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert "reasoning" not in http.sent[0]
+
+
+def test_reasoning_is_openrouter_only(reset_settings) -> None:
+    from arcvisual.providers.longcontext_provider import LongContextProvider
+
+    reset_settings(ARCVISUAL_PROVIDER="mistral", MISTRAL_API_KEY="k", LLM_REASONING="1")
+    http = _Http(_ok('{"answer": "ok"}'))
+    LongContextProvider(client=http).structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert "reasoning" not in http.sent[0]
+
+
+NO_SCHEMA_HOST = _Resp(
+    404,
+    '{"error":{"message":"No endpoints found that can handle the requested '
+    'parameters.","code":404}}',
+)
+NO_HOST_AT_ALL = _Resp(
+    404,
+    '{"error":{"message":"No endpoints found for nvidia/nemotron-3.5-lightning:free.",'
+    '"code":404}}',
+)
+
+
+def test_a_free_endpoint_without_schema_support_is_prompted(reset_settings) -> None:
+    """require_parameters + a free host that lacks response_format = a 404, not an
+    answer. The schema goes in the prompt instead, on the same model."""
+    http = _Http(NO_SCHEMA_HOST, _ok('{"answer": "ok"}'))
+    provider = _provider(reset_settings, http)
+    result = provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert result.ok and result.model == "nvidia/nemotron-3.5-lightning:free"
+    assert "response_format" not in http.sent[1]
+    assert "provider" not in http.sent[1]
+
+
+def test_a_withdrawn_free_endpoint_falls_through_to_the_next_model(
+    reset_settings,
+) -> None:
+    http = _Http(NO_SCHEMA_HOST, NO_HOST_AT_ALL, _ok('{"answer": "ok"}'))
+    provider = _provider(reset_settings, http)
+    result = provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+
+
+FREE_DAILY_QUOTA = _Resp(
+    429,
+    '{"error":{"message":"Rate limit exceeded: free-models-per-day. Add 10 credits '
+    'to unlock 1000 free model requests per day","code":429}}',
+)
+
+
+def test_a_spent_free_quota_falls_through_to_the_paid_model(reset_settings) -> None:
+    """Retrying a daily cap cannot succeed until tomorrow; the paid models behind the
+    free one are the only way the paper still gets explained today."""
+    http = _Http(FREE_DAILY_QUOTA, _ok('{"answer": "ok"}'))
+    provider = _provider(reset_settings, http)
+    result = provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+    )
+    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+    # Remembered for the rest of the process: the next call skips the spent model.
+    assert provider.model_for(Task.CLASSIFY) == "qwen/qwen3-235b-a22b-2507"
+
+
+def test_a_paid_models_daily_limit_is_not_mistaken_for_a_free_quota(
+    reset_settings,
+) -> None:
+    from arcvisual.providers.base import ProviderError
+
+    http = _Http(_Resp(429, '{"error":{"message":"tokens per day (TPD): Limit 1"}}'))
+    provider = _provider(reset_settings, http, LLM_MODEL_CODEGEN="paid/model")
+    with pytest.raises(ProviderError, match="daily token quota"):
+        provider.structured(
+            system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
+        )
