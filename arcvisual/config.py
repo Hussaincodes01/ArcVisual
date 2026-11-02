@@ -15,7 +15,7 @@ from functools import lru_cache
 #: Bumped whenever pipeline behaviour changes in a way that should produce a
 #: different article for the same paper. Part of the L3 cache key and of the
 #: (paper_id, pipeline_version) idempotency key on `jobs`.
-PIPELINE_VERSION = "0.3.0-diagrams"
+PIPELINE_VERSION = "0.3.1-grounding"
 
 #: Pinned render environment. Any change here invalidates every L2 artifact.
 MANIM_VERSION = "0.18.1"

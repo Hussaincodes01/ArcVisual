@@ -541,13 +541,128 @@ def span_for_text(section: Section, needle: str) -> SourceSpan | None:
         collapsed = re.sub(r"\s+", " ", section.raw)
         j = collapsed.find(flat)
         if j == -1:
-            return None
+            return _span_for_normalised(section, needle)
         idx = _map_collapsed_offset(section.raw, j)
         if idx is None:
             return None
         end = idx + _consume_len(section.raw, idx, len(flat))
         return _span(section.id, section.raw, idx, min(end, len(section.raw)))
     return _span(section.id, section.raw, idx, idx + len(needle))
+
+
+#: TeX that carries no words a reader would quote: citations, cross-references,
+#: labels and footnote markers. Removed whole, argument included.
+_NOISE_CMD = re.compile(
+    r"\\(?:cite[a-z]*|ref|eqref|autoref|cref|Cref|label|footnote|url|href)\*?"
+    r"(?:\[[^\]]*\])*\{[^{}]*\}"
+)
+#: Any other command name: dropped, its arguments kept (\emph{x} reads as x).
+_ANY_CMD = re.compile(r"\\[A-Za-z]+\*?")
+_FOLD = {
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "``": '"',
+    "''": '"',
+    "\u2013": "-",
+    "\u2014": "-",
+    "--": "-",
+    "~": " ",
+    "\u00a0": " ",
+}
+#: Shortest verbatim run, in words, that grounds a quote the model only partly
+#: copied — long enough that it cannot match by accident.
+_MIN_RUN_WORDS = 8
+
+
+def _normalise(text: str) -> tuple[str, list[int]]:
+    """Lower-case words-and-punctuation view of ``text``, with an offset map.
+
+    ``out[k]`` came from ``text[index[k]]``, so a match found in the normalised view
+    maps back to an exact span of the original. That is what keeps tolerant matching
+    honest: the span still points at real characters of the paper.
+    """
+    dropped = [False] * len(text)
+    for m in _NOISE_CMD.finditer(text):
+        for i in range(m.start(), m.end()):
+            dropped[i] = True
+    for m in _ANY_CMD.finditer(text):
+        for i in range(m.start(), m.end()):
+            dropped[i] = True
+    chars: list[str] = []
+    index: list[int] = []
+    i = 0
+    while i < len(text):
+        if dropped[i]:
+            i += 1
+            continue
+        two = text[i : i + 2]
+        if two in _FOLD:
+            rep, step = _FOLD[two], 2
+        else:
+            ch = text[i]
+            rep, step = _FOLD.get(ch, ch), 1
+            if ch in "${}\\":
+                rep = " "
+        for r in rep:
+            if r.isspace():
+                if chars and chars[-1] != " ":
+                    chars.append(" ")
+                    index.append(i)
+            else:
+                chars.append(r.lower())
+                index.append(i)
+        i += step
+    # No space before closing punctuation: "attention , and" == "attention, and".
+    out_c: list[str] = []
+    out_i: list[int] = []
+    for c, k in zip(chars, index, strict=True):
+        if c in ",.;:)!?" and out_c and out_c[-1] == " ":
+            out_c.pop()
+            out_i.pop()
+        out_c.append(c)
+        out_i.append(k)
+    if out_c and out_c[-1] == " ":  # never a leading space: see the append above
+        out_c.pop()
+        out_i.pop()
+    return "".join(out_c), out_i
+
+
+def _span_for_normalised(section: Section, needle: str) -> SourceSpan | None:
+    """Ground a quote the model cleaned up: TeX dropped, quotes and dashes changed.
+
+    Models read ``$\\sqrt{d_k}$~\\cite{x}`` and quote "sqrt d_k", or straighten a
+    quotation mark, and an exact search drops a correct quote. Both sides are
+    normalised the same way and the match is mapped back to the raw text, so the
+    span is still exactly what the paper says. A quote the model only partly copied
+    grounds to its longest verbatim run, when that run is long enough not to be a
+    coincidence.
+    """
+    hay, index = _normalise(section.raw)
+    want, _ = _normalise(needle)
+    if not want or not hay:
+        return None
+    j = hay.find(want)
+    if j != -1:
+        return _span_from(section, index, j, len(want))
+    words = want.split(" ")
+    if len(words) < _MIN_RUN_WORDS:
+        return None
+    need = max(_MIN_RUN_WORDS, int(len(words) * 0.6 + 0.999))
+    for size in range(len(words), need - 1, -1):
+        for start in range(0, len(words) - size + 1):
+            run = " ".join(words[start : start + size])
+            j = hay.find(run)
+            if j != -1:
+                return _span_from(section, index, j, len(run))
+    return None
+
+
+def _span_from(section: Section, index: list[int], j: int, n: int) -> SourceSpan:
+    lo = index[j]
+    hi = index[j + n - 1] + 1
+    return _span(section.id, section.raw, lo, hi)
 
 
 def _map_collapsed_offset(raw: str, collapsed_idx: int) -> int | None:
