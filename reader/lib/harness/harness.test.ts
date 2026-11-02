@@ -120,30 +120,53 @@ describe("diagram tools", () => {
     expect(problems.some((p) => p.includes("keep it under 70s"))).toBe(true);
   });
 
-  it("refuse finish until both drawing and script are sound", () => {
+  it("accept a whole sound diagram in one call", () => {
     const s = emptyState();
-    expect(runTool(s, "finish", "{}").done).toBe(false);
-    runTool(s, "draw", JSON.stringify(ATTENTION));
-    expect(runTool(s, "finish", "{}").reply.problems).toContain("script the steps first");
-    runTool(s, "script", JSON.stringify(STEPS));
-    expect(runTool(s, "finish", "{}").done).toBe(true);
+    const { reply, done } = runTool(s, "submit_diagram", JSON.stringify({ ...ATTENTION, ...STEPS }));
+    expect(reply.problems).toEqual([]);
+    expect(done).toBe(true);
+    expect(s.steps).toHaveLength(4);
+  });
+
+  it("refuse a diagram with every problem listed at once", () => {
+    const broken = JSON.parse(JSON.stringify({ ...ATTENTION, ...STEPS }));
+    broken.elements[1].row = 0;
+    broken.connections.push({ src: "q", dst: "ghost" });
+    const { reply, done } = runTool(emptyState(), "submit_diagram", JSON.stringify(broken));
+    expect(done).toBe(false);
+    expect(reply.problems).toEqual(
+      expect.arrayContaining(["k and q share grid cell (0, 0); move one", 'arrow q->ghost: no element "ghost"']),
+    );
   });
 
   it("answer an unknown tool or broken JSON with a problem, not an exception", () => {
     expect(runTool(emptyState(), "paint", "{}").reply.problems[0]).toMatch(/no tool named "paint"/);
-    expect(runTool(emptyState(), "draw", "{not json").reply.problems[0]).toMatch(/not valid JSON/);
+    expect(runTool(emptyState(), "submit_diagram", "{not json").reply.problems[0]).toMatch(/not valid JSON/);
   });
 });
 
 // -- agent loop ----------------------------------------------------------------- //
 
 describe("diagram agent", () => {
-  it("fixes a reported problem and finishes in two turns, carrying reasoning forward", async () => {
+  it("accepts a sound first submission in one turn", async () => {
+    const { fn } = scriptedFetch([reply([toolCall("submit_diagram", { ...ATTENTION, ...STEPS })])]);
+    const result = await drawDiagram(REQUEST, {
+      apiKey: "k",
+      models: ["m"],
+      reasoningMaxTokens: 800,
+      deadline: Date.now() + 60_000,
+      fetch: fn,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.turns).toBe(1);
+  });
+
+  it("fixes a reported problem in a second turn, carrying reasoning forward", async () => {
     const broken = JSON.parse(JSON.stringify(ATTENTION));
     broken.elements[1].row = 0;
     const { fn, sent } = scriptedFetch([
-      reply([toolCall("draw", broken), toolCall("script", STEPS)], { reasoning_details: [{ type: "reasoning.text", text: "plan" }] }),
-      reply([toolCall("draw", ATTENTION), toolCall("finish", {})]),
+      reply([toolCall("submit_diagram", { ...broken, ...STEPS })], { reasoning_details: [{ type: "reasoning.text", text: "plan" }] }),
+      reply([toolCall("submit_diagram", { ...ATTENTION, ...STEPS })]),
     ]);
     const result = await drawDiagram(REQUEST, {
       apiKey: "k",
@@ -186,7 +209,7 @@ describe("diagram agent", () => {
 // -- client --------------------------------------------------------------------- //
 
 describe("openrouter client", () => {
-  const ok = () => reply([toolCall("finish", {})]);
+  const ok = () => reply([toolCall("submit_diagram", {})]);
 
   it("hands a spent free model over to the next in the chain", async () => {
     const { fn, sent } = scriptedFetch([

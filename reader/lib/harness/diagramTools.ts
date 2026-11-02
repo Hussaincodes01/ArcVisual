@@ -6,9 +6,11 @@
  * and answers with concrete problems ("q and k share cell (0, 0)"), so the model
  * fixes them in the same conversation.
  *
- * The tools are deliberately coarse — `draw` sets every element and arrow at once,
- * `script` every step — because each turn on the free endpoint costs seconds: a
- * diagram should take two or three turns, not twenty.
+ * There is one tool, deliberately: `submit_diagram` takes the whole diagram —
+ * elements, arrows and steps — and is accepted the moment it has no problems. Each
+ * turn on the free endpoint costs ~15s, and a live run with separate draw / script /
+ * finish tools took all five allowed turns (75s) because the model called them one
+ * at a time. One coarse tool makes the good case one turn and each fix one more.
  *
  * Runtime is measured with `planConceptDiagram`, the very function the browser uses
  * to animate the scene, so "fits the runtime cap" means exactly what the reader
@@ -95,14 +97,44 @@ const elementSchema = {
   required: ["id", "kind", "label", "column", "row"],
 };
 
+const stepSchema = {
+  type: "object",
+  properties: {
+    caption: { type: "string", description: "One plain sentence, under 90 characters." },
+    show: { type: "array", items: { type: "string" } },
+    focus: { type: "array", items: { type: "string" } },
+    flow: { type: "array", items: { type: "string" }, description: "A path of element ids, in order." },
+    marks: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { target: { type: "string" }, item: { type: "integer" }, col: { type: "integer" } },
+        required: ["target", "item"],
+      },
+    },
+    relabel: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { id: { type: "string" }, label: { type: "string" } },
+        required: ["id", "label"],
+      },
+    },
+  },
+  required: ["caption"],
+};
+
+export const TOOL_NAME = "submit_diagram";
+
 export const TOOLS: ToolDef[] = [
   {
     type: "function",
     function: {
-      name: "draw",
+      name: TOOL_NAME,
       description:
-        "Set the diagram's elements and arrows, replacing any drawn before. Returns the problems to fix " +
-        "(unknown ids, two elements in one cell, ...). Call it again with the whole corrected diagram.",
+        "Submit the whole diagram: elements, arrows and animation steps. It is accepted at once if it has no " +
+        "problems; otherwise you get every problem in one list (unknown ids, two elements in one cell, marks on " +
+        "elements without items, runtime over 70s). Fix them all and submit the whole diagram again.",
       parameters: {
         type: "object",
         properties: {
@@ -122,63 +154,10 @@ export const TOOLS: ToolDef[] = [
               required: ["src", "dst"],
             },
           },
+          steps: { type: "array", items: stepSchema, minItems: 1, maxItems: 8 },
         },
-        required: ["elements", "connections"],
+        required: ["elements", "connections", "steps"],
       },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "script",
-      description:
-        "Set the animation steps, replacing any set before. Each step is one beat: a caption plus what appears, " +
-        "what is in focus, where a pulse flows, which cells light up, which labels change. Returns problems to fix.",
-      parameters: {
-        type: "object",
-        properties: {
-          steps: {
-            type: "array",
-            minItems: 1,
-            maxItems: 8,
-            items: {
-              type: "object",
-              properties: {
-                caption: { type: "string", description: "One plain sentence, under 90 characters." },
-                show: { type: "array", items: { type: "string" } },
-                focus: { type: "array", items: { type: "string" } },
-                flow: { type: "array", items: { type: "string" }, description: "A path of element ids, in order." },
-                marks: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: { target: { type: "string" }, item: { type: "integer" }, col: { type: "integer" } },
-                    required: ["target", "item"],
-                  },
-                },
-                relabel: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: { id: { type: "string" }, label: { type: "string" } },
-                    required: ["id", "label"],
-                  },
-                },
-              },
-              required: ["caption"],
-            },
-          },
-        },
-        required: ["steps"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "finish",
-      description: "Submit the diagram. Refused, with the reasons, while draw or script still report problems.",
-      parameters: { type: "object", properties: {} },
     },
   },
 ];
@@ -269,38 +248,29 @@ export function toParams(state: DiagramState): Record<string, unknown> {
   };
 }
 
-/** Apply one tool call to the state and answer it. `done` is set by an accepted finish. */
+/** Apply one tool call to the state and answer it. `done` means accepted. */
 export function runTool(
   state: DiagramState,
   name: string,
   rawArgs: string,
 ): { reply: ToolReply; done: boolean } {
+  if (name !== TOOL_NAME) {
+    return { reply: { ok: false, problems: [`no tool named ${JSON.stringify(name)}; call ${TOOL_NAME}`], notes: [] }, done: false };
+  }
   let args: Record<string, unknown>;
   try {
     args = rawArgs.trim() ? (JSON.parse(rawArgs) as Record<string, unknown>) : {};
   } catch {
     return { reply: { ok: false, problems: [`arguments to ${name} were not valid JSON`], notes: [] }, done: false };
   }
-  if (name === "draw") {
-    state.elements = asArray<DiagramElement>(args.elements);
-    state.connections = asArray<DiagramConnection>(args.connections);
-    if (typeof args.title === "string") state.title = args.title.slice(0, 60) || null;
-    const problems = checkDrawing(state);
-    const notes = state.steps.length ? checkScript(state).problems.map((p) => `the current script: ${p}`) : [];
-    return { reply: { ok: !problems.length, problems, notes }, done: false };
-  }
-  if (name === "script") {
-    state.steps = asArray<DiagramStep>(args.steps);
-    const drawing = checkDrawing(state);
-    if (drawing.length) {
-      return { reply: { ok: false, problems: ["draw a valid diagram first", ...drawing], notes: [] }, done: false };
-    }
-    const { problems, notes } = checkScript(state);
-    return { reply: { ok: !problems.length, problems, notes }, done: false };
-  }
-  if (name === "finish") {
-    const problems = [...checkDrawing(state), ...(state.steps.length ? checkScript(state).problems : ["script the steps first"])];
-    return { reply: { ok: !problems.length, problems, notes: [] }, done: !problems.length };
-  }
-  return { reply: { ok: false, problems: [`no tool named ${JSON.stringify(name)}; use draw, script or finish`], notes: [] }, done: false };
+  state.elements = asArray<DiagramElement>(args.elements);
+  state.connections = asArray<DiagramConnection>(args.connections);
+  state.steps = asArray<DiagramStep>(args.steps);
+  state.title = typeof args.title === "string" ? args.title.slice(0, 60) || null : null;
+  const drawing = checkDrawing(state);
+  // Script problems are only meaningful once the drawing is sound; report both
+  // when the drawing is fine, so one turn can fix everything.
+  const script = drawing.length ? { problems: [], notes: [] } : checkScript(state);
+  const problems = [...drawing, ...script.problems];
+  return { reply: { ok: !problems.length, problems, notes: script.notes }, done: !problems.length };
 }

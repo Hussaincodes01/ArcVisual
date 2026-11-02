@@ -1,10 +1,10 @@
 /**
  * The diagram agent: a model draws one `concept_diagram` by calling tools.
  *
- * Built for a slow free model, so turns are the unit of cost. The prompt asks for
- * `draw` and `script` together in the first turn and `finish` in the next; problems
- * found by the tools come back in the same conversation, so a fix costs one more
- * turn instead of a whole regeneration. The loop stops at a turn limit and at the
+ * Built for a slow free model, so turns are the unit of cost: one tool takes the
+ * whole diagram and accepts it the moment it is sound, so the good case is one turn.
+ * Problems come back in the same conversation, so a fix costs one more turn instead
+ * of a whole regeneration. The loop stops at a turn limit and at the
  * caller's deadline, whichever comes first.
  */
 
@@ -31,14 +31,9 @@ export interface DiagramResult {
   notes: string[];
 }
 
-export const SYSTEM = `You draw one diagram that explains one idea from a research paper, then script how it animates. You work by calling tools.
+export const SYSTEM = `You draw one diagram that explains one idea from a research paper, and script how it animates.
 
-TOOLS
-- draw: every element and arrow at once. Replaces what was drawn before.
-- script: every animation step at once. Replaces the previous script.
-- finish: submit. Refused, with reasons, while problems remain.
-
-WORK EFFICIENTLY. In your FIRST reply, call draw AND script together. If both report ok, call finish in your next reply. If either reports problems, call it again with the whole corrected version, then finish. Do not write prose outside tool calls.
+You have one tool, submit_diagram. Call it with the WHOLE diagram — elements, arrows and steps — in your first reply. It is accepted at once if nothing is wrong; otherwise it lists every problem. Fix them all and call it again with the whole corrected diagram. Write no prose outside the tool call.
 
 DRAW THE OBJECTS THE IDEA IS ABOUT
 - Use the paper's own things and names: "Queries Q", "Keys K", "Expert 3". Never "Input A".
@@ -87,7 +82,7 @@ export async function drawDiagram(req: DiagramRequest, opts: AgentOptions): Prom
   let usage: Usage = { prompt: 0, completion: 0, reasoning: 0 };
   let model: string | null = null;
   const notes: string[] = [];
-  const maxTurns = opts.maxTurns ?? 5;
+  const maxTurns = opts.maxTurns ?? 4;
   let nudged = false;
 
   for (let turn = 1; turn <= maxTurns; turn++) {
@@ -119,7 +114,7 @@ export async function drawDiagram(req: DiagramRequest, opts: AgentOptions): Prom
         break;
       }
       nudged = true;
-      messages.push({ role: "user", content: "Use the tools: call draw and script now, then finish." });
+      messages.push({ role: "user", content: "Call submit_diagram now with the whole diagram." });
       continue;
     }
     for (const call of calls) {

@@ -337,19 +337,16 @@ Three decisions worth knowing:
 
 `reader/app/api/diagram` is a small TypeScript agent harness in the reader's
 Next.js app; it runs server-side, so the key never reaches a browser. A model draws a
-`concept_diagram` by calling three tools:
+`concept_diagram` by calling one tool, `submit_diagram`, with the whole diagram:
+elements, arrows and steps. The diagram is accepted as soon as it has no problems.
+Otherwise the tool lists every problem at once: unknown ids, two elements in one
+cell, marks on elements without items, or a runtime over 70 s. Runtime is measured
+with `planConceptDiagram`, the code that animates the scene in the browser.
 
-| Tool | Does | Answers with |
-|---|---|---|
-| `draw` | sets every element and arrow | problems: unknown ids, two elements in one cell, self-loops |
-| `script` | sets every animation step | problems: unknown ids, marks on things without items, runtime over 70 s |
-| `finish` | submits | refusal with reasons while problems remain |
-
-The model is told to call `draw` and `script` together in its first turn, so a
-diagram usually takes two turns. A problem costs one more turn in the same
-conversation, not a whole regeneration. Runtime is measured with
-`planConceptDiagram`, the code that animates the scene in the browser.
-`reasoning_details` is passed back between turns.
+The tool is deliberately coarse. Each turn on the free endpoint costs about 15 s, and
+a first version with separate `draw` / `script` / `finish` tools used all five turns
+(75 s) because the model called them one at a time. Now the good case is one turn
+and each fix one more. `reasoning_details` is passed back between turns.
 
 Each call has its own timeout (90 s) within the step's deadline. A free model that
 is slow, spent for the day or withdrawn hands over to the next model.
