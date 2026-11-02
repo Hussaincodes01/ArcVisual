@@ -6,7 +6,9 @@ whole regeneration. This module only asks it for parameters; everything after th
 (the template's validation, beats, Gate 1) is the same path one-shot codegen takes.
 
 It never fails a scene. Not configured, out of time, unreachable, or no accepted
-diagram: it returns None and codegen falls back to the one-shot call.
+diagram: codegen falls back to the one-shot call. A run that answered but drew
+nothing still reports the tokens it spent (``params`` is None), because those
+tokens may have been on a paid fallback model and count against the scene's budget.
 """
 
 from __future__ import annotations
@@ -28,11 +30,14 @@ MAX_BUDGET_S = 240.0
 
 @dataclass
 class AgentDiagram:
-    params: dict[str, Any]
+    #: None when the agent answered without an accepted diagram.
+    params: dict[str, Any] | None
     captions: list[str]
     turns: int
     model: str
     notes: list[str] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 def configured() -> bool:
@@ -47,7 +52,11 @@ def draw(
     budget_s: float,
     client: Any = None,
 ) -> AgentDiagram | None:
-    """Ask the agent for one diagram's parameters, or None to fall back."""
+    """Ask the agent for one diagram.
+
+    None means it was never reached (or never answered usefully). An answer without
+    an accepted diagram comes back with ``params=None`` and the tokens it spent.
+    """
     cfg = settings()
     if not configured():
         return None
@@ -91,13 +100,29 @@ def draw(
         body = response.json()
     except ValueError:
         return None
-    if not body.get("ok") or not isinstance(body.get("params"), dict):
-        log.info("diagram agent gave no diagram: %s", "; ".join(body.get("notes") or []))
+    if not isinstance(body, dict):
         return None
+    usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+    tokens = {
+        "prompt_tokens": _count(usage.get("prompt")),
+        "completion_tokens": _count(usage.get("completion")),
+    }
+    notes = [n for n in body.get("notes") or [] if isinstance(n, str)]
+    drew = bool(body.get("ok")) and isinstance(body.get("params"), dict)
+    if not drew:
+        log.info("diagram agent gave no diagram: %s", "; ".join(notes))
     return AgentDiagram(
-        params=body["params"],
+        params=body["params"] if drew else None,
         captions=[c for c in body.get("captions") or [] if isinstance(c, str)],
-        turns=int(body.get("turns") or 0),
+        turns=_count(body.get("turns")),
         model=str(body.get("model") or ""),
-        notes=[n for n in body.get("notes") or [] if isinstance(n, str)],
+        notes=notes,
+        **tokens,
     )
+
+
+def _count(v: Any) -> int:
+    try:
+        return max(0, int(v or 0))
+    except (TypeError, ValueError):
+        return 0

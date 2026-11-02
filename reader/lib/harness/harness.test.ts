@@ -109,6 +109,14 @@ describe("diagram tools", () => {
     expect(checkScript(s).problems[0]).toMatch(/dot is a op; marks go on/);
   });
 
+  it("refuse what the template would refuse: a flow of more than eight stops", () => {
+    const path = ["q", "dot", "scores", "sm", "out", "sm", "scores", "dot", "q"];
+    const s = state({ steps: [{ caption: "Follow it.", flow: path }] });
+    expect(checkScript(s).problems).toContain("step 1: flow lists 9; at most 8 stops");
+    const eight = state({ steps: [{ caption: "Follow it.", flow: path.slice(0, 8) }] });
+    expect(checkScript(eight).problems).toEqual([]);
+  });
+
   it("measure runtime with the renderer's own timeline", () => {
     const long = Array.from({ length: 8 }, (_, i) => ({
       caption: `Step ${i}.`,

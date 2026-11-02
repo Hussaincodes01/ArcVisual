@@ -58,6 +58,7 @@ AGENT_OK = {
     "turns": 2,
     "model": "nvidia/nemotron-3.5-lightning:free",
     "notes": [],
+    "usage": {"prompt": 12000, "completion": 2000, "reasoning": 800},
 }
 
 
@@ -84,7 +85,6 @@ def test_the_agent_is_asked_with_the_secret_and_the_section(agent_on, storyboard
 @pytest.mark.parametrize(
     "resp",
     [
-        _Resp(200, {"ok": False, "params": None, "notes": ["no accepted diagram"]}),
         _Resp(401, {"error": "unauthorised"}),
         ConnectionError("down"),
     ],
@@ -96,6 +96,24 @@ def test_any_agent_failure_is_a_fallback_not_an_error(agent_on, storyboard, resp
         diagram_agent.draw(storyboard, _opp(storyboard), budget_s=150, client=_Http(resp))
         is None
     )
+
+
+def test_an_agent_that_drew_nothing_still_reports_what_it_spent(
+    agent_on, storyboard
+) -> None:
+    from arcvisual.generate import diagram_agent
+
+    body = {
+        "ok": False,
+        "params": None,
+        "notes": ["no accepted diagram"],
+        "usage": {"prompt": 9000, "completion": 1500, "reasoning": 700},
+    }
+    drawn = diagram_agent.draw(
+        storyboard, _opp(storyboard), budget_s=150, client=_Http(_Resp(200, body))
+    )
+    assert drawn is not None and drawn.params is None
+    assert (drawn.prompt_tokens, drawn.completion_tokens) == (9000, 1500)
 
 
 def test_no_call_without_time_or_configuration(reset_settings, storyboard) -> None:
@@ -162,3 +180,72 @@ def test_repairs_do_not_go_to_the_agent(agent_on, storyboard, monkeypatch) -> No
         attempt=2,
     )
     assert called == []
+
+
+class _PricedProvider(_DiagramProvider):
+    """Prices tokens at $1 in / $2 out per million, as LLM_RATE_IN/OUT would."""
+
+    def usage_from(self, body):
+        from arcvisual.providers.base import Usage
+
+        u = body["usage"]
+        cost = (u["prompt_tokens"] * 1 + u["completion_tokens"] * 2) / 1_000_000
+        return Usage(
+            input_tokens=u["prompt_tokens"],
+            output_tokens=u["completion_tokens"],
+            cost_usd=cost,
+        )
+
+
+def _patch_draw(monkeypatch, body):
+    from arcvisual.generate import diagram_agent
+
+    real = diagram_agent.draw
+    http = _Http(_Resp(200, body))
+    monkeypatch.setattr(
+        diagram_agent,
+        "draw",
+        lambda sb, opp, budget_s: real(sb, opp, budget_s=budget_s, client=http),
+    )
+
+
+def test_the_agents_tokens_count_toward_the_scene_cost(
+    agent_on, storyboard, monkeypatch
+) -> None:
+    from arcvisual.generate import codegen
+
+    _patch_draw(monkeypatch, AGENT_OK)
+    result = codegen.generate_scene(
+        storyboard, _opp(storyboard), provider=_PricedProvider(budget=300_000)
+    )
+    assert result.params_obj is not None, result.notes
+    assert result.cost_usd == pytest.approx((12000 + 2000 * 2) / 1_000_000)
+    assert result.cost_attributed
+
+
+def test_a_failed_agent_run_is_added_to_the_one_shot_cost(
+    agent_on, storyboard, monkeypatch
+) -> None:
+    from arcvisual.generate import codegen
+
+    _patch_draw(
+        monkeypatch,
+        {"ok": False, "params": None, "usage": {"prompt": 5000, "completion": 1000}},
+    )
+    provider = _PricedProvider(budget=300_000)
+    result = codegen.generate_scene(storyboard, _opp(storyboard), provider=provider)
+    assert provider.user, "the one-shot call should have been made"
+    assert result.cost_usd >= (5000 + 1000 * 2) / 1_000_000
+
+
+def test_unpriceable_agent_tokens_are_unattributed_not_free(
+    agent_on, storyboard, monkeypatch
+) -> None:
+    from arcvisual.generate import codegen
+
+    _patch_draw(monkeypatch, AGENT_OK)
+    result = codegen.generate_scene(
+        storyboard, _opp(storyboard), provider=_DiagramProvider(budget=300_000)
+    )
+    assert result.params_obj is not None
+    assert not result.cost_attributed

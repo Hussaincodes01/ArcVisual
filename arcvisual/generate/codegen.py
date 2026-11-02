@@ -200,9 +200,10 @@ def generate_scene(
         usage = Usage(attributed=True)  # genuinely free: no call was made
         notes = ["heuristic parameters — no model provider configured"]
     else:
-        drawn = _draw_with_agent(sb, opportunity, provider, findings)
+        drawn, agent_usage = _draw_with_agent(sb, opportunity, provider, findings)
         if drawn is not None:
-            raw_params, beats, scrubbable, usage, notes = drawn
+            raw_params, beats, scrubbable, notes = drawn
+            usage = agent_usage
         else:
             raw_params, beats, scrubbable, usage = _call_provider(
                 sb,
@@ -213,6 +214,8 @@ def generate_scene(
                 findings=findings,
                 attempt=attempt,
             )
+            # A run that drew nothing still spent tokens, possibly on a paid model.
+            usage = agent_usage.merge(usage)
             notes = []
     cost = usage.cost_usd
 
@@ -276,29 +279,63 @@ def _draw_with_agent(
     opportunity: VisualOpportunity,
     provider: Provider,
     findings: list[str] | None,
-) -> tuple[dict[str, Any], list[Beat], bool, Usage, list[str]] | None:
+) -> tuple[tuple[dict[str, Any], list[Beat], bool, list[str]] | None, Usage]:
     """A first-attempt concept diagram drawn by the TypeScript tool-calling agent.
 
     Only the first attempt: a repair carries Gate 1's findings, which the one-shot
-    path already feeds back. None means "use the one-shot path" — the agent is not
-    configured, ran out of time, or returned no accepted diagram.
+    path already feeds back. The first value is None to mean "use the one-shot
+    path" — the agent is not configured, ran out of time, or accepted no diagram.
+    The second is what the agent spent either way, which counts against the scene's
+    ceiling like any other call: its fallback chain can reach paid models.
     """
     from arcvisual.generate import diagram_agent
 
     if opportunity.archetype is not Archetype.CONCEPT_DIAGRAM or findings:
-        return None
+        return None, Usage()
     if not diagram_agent.configured():
-        return None
+        return None, Usage()
     budget_fn = getattr(provider, "call_budget", None)
     budget = float(budget_fn()) if callable(budget_fn) else 120.0
     drawn = diagram_agent.draw(sb, opportunity, budget_s=budget)
     if drawn is None:
-        return None
+        return None, Usage()
+    spent = _agent_usage(provider, drawn)
+    if drawn.params is None:
+        return None, spent
     captions = drawn.captions or ["(diagram)"]
     beats = fit_beats(captions, MIN_BEAT_S * 2 * len(captions))
     note = f"drawn by the diagram agent in {drawn.turns} turn(s) on {drawn.model}"
-    # Tokens were spent by the agent's own calls, which report no price.
-    return drawn.params, beats, False, Usage(attributed=False), [note, *drawn.notes]
+    return (drawn.params, beats, False, [note, *drawn.notes]), spent
+
+
+def _agent_usage(provider: Provider, drawn: Any) -> Usage:
+    """Price the agent's tokens the way the codegen provider prices its own.
+
+    The agent and the long-context provider share one OpenRouter chain, so the
+    provider's configured rates (``LLM_RATE_IN/OUT``) are the right ones. A provider
+    with no way to price them leaves the spend unattributed rather than free.
+    """
+    if not (drawn.prompt_tokens or drawn.completion_tokens):
+        return Usage()
+    body = {
+        "usage": {
+            "prompt_tokens": drawn.prompt_tokens,
+            "completion_tokens": drawn.completion_tokens,
+        }
+    }
+    price = getattr(provider, "usage_from", None)
+    if callable(price):
+        try:
+            usage = price(body)
+            if isinstance(usage, Usage):
+                return usage
+        except Exception:  # pricing must never fail a scene
+            log.warning("could not price the diagram agent's usage", exc_info=True)
+    return Usage(
+        input_tokens=drawn.prompt_tokens,
+        output_tokens=drawn.completion_tokens,
+        attributed=False,
+    )
 
 
 def fit_beats(captions: list[str], total_s: float) -> list[Beat]:

@@ -28,6 +28,13 @@ const MAX_COLUMNS = 8;
 const MAX_ROWS = 6;
 /** Same ceiling as concept_diagram.MAX_RUNTIME_S. */
 export const MAX_RUNTIME_S = 70;
+const MAX_ITEMS = 8;
+/**
+ * Per-step list limits, the same as concept_diagram.Step's. A list over one of these
+ * fails the template's validation, so the tool must refuse it too: anything the tool
+ * accepts and the template rejects costs the scene a whole failed attempt.
+ */
+export const STEP_LIMITS = { show: 16, focus: 8, flow: 8, marks: 12, relabel: 4 } as const;
 
 export interface DiagramElement {
   id: string;
@@ -81,16 +88,16 @@ export function emptyState(): DiagramState {
 const elementSchema = {
   type: "object",
   properties: {
-    id: { type: "string", description: "Letters, digits and _ only." },
+    id: { type: "string", maxLength: 32, description: "Letters, digits and _ only." },
     kind: { type: "string", enum: [...KINDS] },
     label: { type: "string", description: "Short; Unicode maths (QKᵀ, √dₖ), never LaTeX." },
     column: { type: "integer", minimum: 0, maximum: MAX_COLUMNS - 1 },
     row: { type: "integer", minimum: 0, maximum: MAX_ROWS - 1 },
     col_span: { type: "integer", minimum: 1, maximum: MAX_COLUMNS },
     row_span: { type: "integer", minimum: 1, maximum: MAX_ROWS },
-    cells: { type: "array", items: { type: "string" }, description: "Item labels (tokens/stack/bars) or grid row/column labels." },
-    size: { type: "integer", minimum: 0, maximum: 8, description: "Item count, or N for an N×N grid." },
-    values: { type: "array", items: { type: "number" }, description: "bars: one height each. grid: N×N, row-major. Only numbers the paper gives." },
+    cells: { type: "array", items: { type: "string" }, maxItems: MAX_ITEMS, description: "Item labels (tokens/stack/bars) or grid row/column labels." },
+    size: { type: "integer", minimum: 0, maximum: MAX_ITEMS, description: "Item count, or N for an N×N grid." },
+    values: { type: "array", items: { type: "number" }, maxItems: MAX_ITEMS * MAX_ITEMS, description: "bars: one height each. grid: N×N, row-major. Only numbers the paper gives." },
     tone: { type: "string", enum: [...TONES] },
     note: { type: "string", description: "A short second line, e.g. a shape like n × d." },
   },
@@ -101,11 +108,17 @@ const stepSchema = {
   type: "object",
   properties: {
     caption: { type: "string", description: "One plain sentence, under 90 characters." },
-    show: { type: "array", items: { type: "string" } },
-    focus: { type: "array", items: { type: "string" } },
-    flow: { type: "array", items: { type: "string" }, description: "A path of element ids, in order." },
+    show: { type: "array", items: { type: "string" }, maxItems: STEP_LIMITS.show },
+    focus: { type: "array", items: { type: "string" }, maxItems: STEP_LIMITS.focus },
+    flow: {
+      type: "array",
+      items: { type: "string" },
+      maxItems: STEP_LIMITS.flow,
+      description: `A path of element ids, in order; at most ${STEP_LIMITS.flow} stops.`,
+    },
     marks: {
       type: "array",
+      maxItems: STEP_LIMITS.marks,
       items: {
         type: "object",
         properties: { target: { type: "string" }, item: { type: "integer" }, col: { type: "integer" } },
@@ -114,6 +127,7 @@ const stepSchema = {
     },
     relabel: {
       type: "array",
+      maxItems: STEP_LIMITS.relabel,
       items: {
         type: "object",
         properties: { id: { type: "string" }, label: { type: "string" } },
@@ -171,15 +185,20 @@ export function checkDrawing(state: DiagramState): string[] {
   const { elements, connections } = state;
   if (elements.length < 2) problems.push("draw at least 2 elements");
   if (elements.length > 16) problems.push(`${elements.length} elements; at most 16`);
+  if (connections.length > 20) problems.push(`${connections.length} arrows; at most 20`);
   const ids = new Set<string>();
   const cells = new Map<string, string>();
   for (const e of elements) {
     if (!e.id || !ID.test(e.id)) problems.push(`id ${JSON.stringify(e.id)}: use letters, digits and _ only`);
+    else if (e.id.length > 32) problems.push(`id ${e.id}: at most 32 characters`);
     if (ids.has(e.id)) problems.push(`duplicate id ${e.id}`);
     ids.add(e.id);
     if (!(KINDS as readonly string[]).includes(e.kind)) problems.push(`${e.id}: unknown kind ${JSON.stringify(e.kind)}`);
     if (!Number.isInteger(e.column) || e.column < 0 || e.column >= MAX_COLUMNS) problems.push(`${e.id}: column must be 0-7`);
     if (!Number.isInteger(e.row) || e.row < 0 || e.row >= MAX_ROWS) problems.push(`${e.id}: row must be 0-5`);
+    if (asArray(e.cells).length > MAX_ITEMS) problems.push(`${e.id}: ${asArray(e.cells).length} cells; at most ${MAX_ITEMS}`);
+    if (asArray(e.values).length > MAX_ITEMS * MAX_ITEMS)
+      problems.push(`${e.id}: ${asArray(e.values).length} values; at most ${MAX_ITEMS * MAX_ITEMS}`);
     if (e.kind === "container") continue;
     const cs = Math.max(1, e.col_span ?? 1);
     const rs = Math.max(1, e.row_span ?? 1);
@@ -213,6 +232,10 @@ export function checkScript(state: DiagramState): { problems: string[]; notes: s
     const n = i + 1;
     if (!s.caption?.trim()) problems.push(`step ${n}: needs a caption`);
     else if (s.caption.length > 90) notes.push(`step ${n}: caption is ${s.caption.length} characters and will be shortened to 90`);
+    for (const [field, max] of Object.entries(STEP_LIMITS)) {
+      const n2 = asArray(s[field as keyof DiagramStep]).length;
+      if (n2 > max) problems.push(`step ${n}: ${field} lists ${n2}; at most ${max}${field === "flow" ? " stops" : ""}`);
+    }
     const named = [...asArray<string>(s.show), ...asArray<string>(s.focus), ...asArray<string>(s.flow)];
     for (const r of asArray<{ id: string }>(s.relabel)) named.push(r.id);
     for (const id of named) if (!byId.has(id)) problems.push(`step ${n}: no element ${JSON.stringify(id)}`);
