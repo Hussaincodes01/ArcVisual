@@ -102,7 +102,8 @@ def draw(
         return None
     if not isinstance(body, dict):
         return None
-    usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+    raw_usage = body.get("usage")
+    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
     tokens = {
         "prompt_tokens": _count(usage.get("prompt")),
         "completion_tokens": _count(usage.get("completion")),
