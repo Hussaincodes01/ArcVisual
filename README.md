@@ -333,6 +333,35 @@ Three decisions worth knowing:
 `ANTHROPIC_BASE_URL` routes the Anthropic provider through any compatible gateway
 (Dedalus Labs, a proxy). Same SDK, same model ids — a setting, not a fourth provider.
 
+### The diagram agent (TypeScript, tool calling)
+
+`reader/app/api/diagram` is a small TypeScript agent harness in the reader's
+Next.js app; it runs server-side, so the key never reaches a browser. A model draws a
+`concept_diagram` by calling three tools:
+
+| Tool | Does | Answers with |
+|---|---|---|
+| `draw` | sets every element and arrow | problems: unknown ids, two elements in one cell, self-loops |
+| `script` | sets every animation step | problems: unknown ids, marks on things without items, runtime over 70 s |
+| `finish` | submits | refusal with reasons while problems remain |
+
+The model is told to call `draw` and `script` together in its first turn, so a
+diagram usually takes two turns. A problem costs one more turn in the same
+conversation, not a whole regeneration. Runtime is measured with
+`planConceptDiagram`, the code that animates the scene in the browser.
+`reasoning_details` is passed back between turns.
+
+Each call has its own timeout (90 s) within the step's deadline. A free model that
+is slow, spent for the day or withdrawn hands over to the next model.
+`lib/harness/harness.test.ts` covers all of this (`npm test`).
+
+The Python pipeline calls the agent for a scene's first attempt when
+`ARCVISUAL_DIAGRAM_AGENT_URL` and `ARCVISUAL_INTERNAL_SECRET` are set
+(`arcvisual/generate/diagram_agent.py`). It passes the remaining step budget, and
+validates the result exactly as it validates one-shot output. If the agent isn't
+configured, is unreachable, runs out of time or returns nothing, the scene falls
+back to one-shot generation.
+
 ### Long-context presets (100K–260K tokens per request)
 
 `arcvisual/providers/longcontext_provider.py` is one OpenAI-compatible provider with
