@@ -361,7 +361,10 @@ On OpenRouter the Nemotron free endpoint leads the chain. It reasons while drawi
 diagrams (`reasoning: {"enabled": true}`; `LLM_REASONING=0` turns it off) but not while
 analysing the paper, unless `LLM_REASONING_ANALYZE=1`. Measured on the free endpoint
 (~86 tokens/s), the same analysis took 112 s with reasoning and 30 s without, and the
-real one with reasoning ran past Vercel's 300 s function limit.
+real one with reasoning ran past Vercel's 300 s function limit. Reasoning is also capped at
+800 tokens per call (`LLM_REASONING_MAX_TOKENS`, 0 for no cap). Measured on four
+diagram calls running side by side, a diagram took 66 s with unlimited reasoning,
+49 s with `effort: low`, 15 s with the 800-token cap and 8 s with reasoning off.
 
 Every call is streamed and stopped at a wall-clock limit (`LLM_CALL_TIMEOUT_S`,
 default 120 s, and never past the end of the current step). A plain read timeout

@@ -462,6 +462,12 @@ class LongContext:
     #: (7,272 reasoning tokens) and 30s without — and the real one, with a schema and
     #: up to 40 concepts, ran past Vercel's 300s function limit every time.
     reasoning_analyze: bool = False
+    #: Ceiling on reasoning tokens per call (OpenRouter's `reasoning.max_tokens`); 0
+    #: lets the model reason as long as it likes. Measured on the free Nemotron
+    #: endpoint, four diagram calls side by side: unbounded 66s (2,923 reasoning
+    #: tokens), `effort: low` 49s, capped at 800 15s, off 8s. The cap keeps the model
+    #: planning the layout and makes a diagram about four times faster.
+    reasoning_max_tokens: int = 800
     #: Wall-clock ceiling on one model call, in seconds. A read timeout cannot bound
     #: it: OpenRouter keeps a slow non-streaming request alive with periodic bytes, so
     #: a call outlived the serverless function and was killed instead of failing.
@@ -509,6 +515,9 @@ def long_context_from_env(preset: str, env=os.environ.get) -> LongContext:
         reasoning_effort=env("LLM_REASONING_EFFORT", "") or "",
         reasoning=_flag(env("LLM_REASONING"), base.reasoning),
         reasoning_analyze=_flag(env("LLM_REASONING_ANALYZE"), False),
+        reasoning_max_tokens=int(
+            env("LLM_REASONING_MAX_TOKENS") or LongContext.reasoning_max_tokens
+        ),
         call_timeout_s=float(env("LLM_CALL_TIMEOUT_S") or LongContext.call_timeout_s),
         analysis_item_budget=int(
             env("LLM_ANALYSIS_ITEMS") or LongContext.analysis_item_budget

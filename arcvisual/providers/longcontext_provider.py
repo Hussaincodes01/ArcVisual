@@ -130,7 +130,8 @@ class LongContextProvider(OpenAICompatProvider):
         if self._reasons():
             # Every call here is a single turn, so there is no `reasoning_details` to
             # pass back: the model reasons, answers, and the next call starts fresh.
-            extra["reasoning"] = {"enabled": True}
+            cap = self._cfg.reasoning_max_tokens
+            extra["reasoning"] = {"max_tokens": cap} if cap > 0 else {"enabled": True}
         if response_format is not None:
             # Route only to upstream hosts that honour `response_format`. Without it
             # OpenRouter may pick one that silently ignores the schema.

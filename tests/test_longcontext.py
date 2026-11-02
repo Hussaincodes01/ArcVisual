@@ -266,7 +266,8 @@ def test_openrouter_leads_with_nemotron_and_asks_it_to_reason(reset_settings) ->
         system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
     )
     assert http.sent[0]["model"] == "nvidia/nemotron-3.5-lightning:free"
-    assert http.sent[0]["reasoning"] == {"enabled": True}
+    # Bounded: measured 15s per diagram with an 800-token cap against 66s without.
+    assert http.sent[0]["reasoning"] == {"max_tokens": 800}
 
 
 def test_analysis_does_not_reason_unless_asked(reset_settings) -> None:
@@ -283,6 +284,15 @@ def test_analysis_does_not_reason_unless_asked(reset_settings) -> None:
     provider = _provider(reset_settings, http, LLM_REASONING_ANALYZE="1")
     provider.structured(
         system=[TextBlock("s")], user="u", output_model=Out, task=Task.CLASSIFY
+    )
+    assert http.sent[0]["reasoning"] == {"max_tokens": 800}
+
+
+def test_reasoning_can_be_unbounded(reset_settings) -> None:
+    http = _Http(_ok('{"answer": "ok"}'))
+    provider = _provider(reset_settings, http, LLM_REASONING_MAX_TOKENS="0")
+    provider.structured(
+        system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
     )
     assert http.sent[0]["reasoning"] == {"enabled": True}
 
