@@ -110,6 +110,11 @@ class OpenAICompatProvider:
         """Host-specific request fields, merged into every chat payload."""
         return {}
 
+    def _post(self, payload: dict[str, Any]) -> Any:
+        """Send one chat request and return a response with ``status_code``,
+        ``headers``, ``text`` and ``json()``. Plain, unbounded POST by default."""
+        return self._client().post("/chat/completions", json=payload)
+
     def _model_exhausted(self, model: str, body: str) -> None:
         """Raise :class:`ModelUnavailable` if a 429 body means `model` is spent for
         the day, so the next configured model is tried. No-op by default."""
@@ -363,7 +368,13 @@ class OpenAICompatProvider:
         if meter is not None:
             reserved = meter.acquire(max_tokens + prompt_tokens)
         try:
-            response = self._client().post("/chat/completions", json=payload)
+            response = self._post(payload)
+        except ProviderError:
+            # Already a verdict (out of time, model unavailable): pass it on as is,
+            # or the fallback chain would see a generic retryable failure instead.
+            if meter is not None:
+                meter.settle(reserved, 0)
+            raise
         except Exception as exc:
             if meter is not None:
                 meter.settle(reserved, 0)  # nothing was spent; give it all back
