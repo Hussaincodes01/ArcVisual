@@ -108,7 +108,7 @@ jobs:
       - run: pytest tests/test_render.py -m slow -v
 
   reader:
-    name: reader typecheck + build
+    name: reader typecheck + tests + build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -122,4 +122,5 @@ jobs:
           cache-dependency-path: reader/package.json
       - run: npm install --no-audit --no-fund
       - run: npm run typecheck
+      - run: npm test
       - run: npm run build

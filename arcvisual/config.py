@@ -15,7 +15,7 @@ from functools import lru_cache
 #: Bumped whenever pipeline behaviour changes in a way that should produce a
 #: different article for the same paper. Part of the L3 cache key and of the
 #: (paper_id, pipeline_version) idempotency key on `jobs`.
-PIPELINE_VERSION = "0.3.0-diagrams"
+PIPELINE_VERSION = "0.3.1-grounding"
 
 #: Pinned render environment. Any change here invalidates every L2 artifact.
 MANIM_VERSION = "0.18.1"
@@ -620,6 +620,12 @@ class Settings:
     #: well under the platform's function limit (300s on Vercel Hobby): a scene
     #: started near the end must still finish inside the same invocation.
     step_budget_s: int = 200
+    #: The TypeScript diagram agent (reader/app/api/diagram). When set, concept
+    #: diagrams are drawn by a model calling validated tools instead of one-shot JSON;
+    #: on any failure codegen falls back to the one-shot path.
+    diagram_agent_url: str = ""
+    #: Shared with the agent route; it refuses every request without it.
+    internal_secret: str = ""
 
     @property
     def client_render(self) -> bool:
@@ -754,6 +760,8 @@ def settings() -> Settings:
         strict_ownership=env("STRICT_OWNERSHIP", "1") != "0",
         render_mode=env("ARCVISUAL_RENDER_MODE", "manim"),
         step_budget_s=int(env("ARCVISUAL_STEP_BUDGET_S", "200")),
+        diagram_agent_url=env("ARCVISUAL_DIAGRAM_AGENT_URL", ""),
+        internal_secret=env("ARCVISUAL_INTERNAL_SECRET", ""),
         budgets=Budgets(
             scene_concurrency=int(env("ARCVISUAL_SCENE_CONCURRENCY", "4")),
             max_formula_scenes=int(env("ARCVISUAL_MAX_FORMULA_SCENES", "2")),

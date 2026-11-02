@@ -154,6 +154,12 @@ class LongContextProvider(OpenAICompatProvider):
         """
         self._deadline = deadline
 
+    def call_budget(self) -> float:
+        """Seconds the next model call may take: the per-call cap or what is left of
+        the step, whichever is smaller. Callers outside the provider (the diagram
+        agent) are held to the same deadline."""
+        return self._call_budget()
+
     def _call_budget(self) -> float:
         budget = self._cfg.call_timeout_s
         if self._deadline is not None:

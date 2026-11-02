@@ -200,16 +200,20 @@ def generate_scene(
         usage = Usage(attributed=True)  # genuinely free: no call was made
         notes = ["heuristic parameters — no model provider configured"]
     else:
-        raw_params, beats, scrubbable, usage = _call_provider(
-            sb,
-            opportunity,
-            source_text,
-            provider=provider,
-            previous=previous,
-            findings=findings,
-            attempt=attempt,
-        )
-        notes = []
+        drawn = _draw_with_agent(sb, opportunity, provider, findings)
+        if drawn is not None:
+            raw_params, beats, scrubbable, usage, notes = drawn
+        else:
+            raw_params, beats, scrubbable, usage = _call_provider(
+                sb,
+                opportunity,
+                source_text,
+                provider=provider,
+                previous=previous,
+                findings=findings,
+                attempt=attempt,
+            )
+            notes = []
     cost = usage.cost_usd
 
     # Validate before building the spec: an invalid parameter set must not reach
@@ -265,6 +269,36 @@ def generate_scene(
         provider=provider.name if provider else "heuristic",
         notes=notes,
     )
+
+
+def _draw_with_agent(
+    sb: Storyboard,
+    opportunity: VisualOpportunity,
+    provider: Provider,
+    findings: list[str] | None,
+) -> tuple[dict[str, Any], list[Beat], bool, Usage, list[str]] | None:
+    """A first-attempt concept diagram drawn by the TypeScript tool-calling agent.
+
+    Only the first attempt: a repair carries Gate 1's findings, which the one-shot
+    path already feeds back. None means "use the one-shot path" — the agent is not
+    configured, ran out of time, or returned no accepted diagram.
+    """
+    from arcvisual.generate import diagram_agent
+
+    if opportunity.archetype is not Archetype.CONCEPT_DIAGRAM or findings:
+        return None
+    if not diagram_agent.configured():
+        return None
+    budget_fn = getattr(provider, "call_budget", None)
+    budget = float(budget_fn()) if callable(budget_fn) else 120.0
+    drawn = diagram_agent.draw(sb, opportunity, budget_s=budget)
+    if drawn is None:
+        return None
+    captions = drawn.captions or ["(diagram)"]
+    beats = fit_beats(captions, MIN_BEAT_S * 2 * len(captions))
+    note = f"drawn by the diagram agent in {drawn.turns} turn(s) on {drawn.model}"
+    # Tokens were spent by the agent's own calls, which report no price.
+    return drawn.params, beats, False, Usage(attributed=False), [note, *drawn.notes]
 
 
 def fit_beats(captions: list[str], total_s: float) -> list[Beat]:

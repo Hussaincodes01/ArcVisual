@@ -317,11 +317,10 @@ def _apply(
     #: lists can be paired later without guessing.
     kept_raw_indices: list[int] = []
     for i, c in enumerate(raw.concepts):
-        section = resolve(c.section_id)
+        section, span = _ground(sb, resolve(c.section_id), c.quote)
         if section is None:
             report.concepts_dropped_ungrounded += 1
             continue
-        span = span_for_text(section, c.quote)
         if span is None:
             report.concepts_dropped_ungrounded += 1
             # Log the quote, not just the name. "dropped ungrounded concept 'X'" says
@@ -391,12 +390,8 @@ def _apply(
             report.opportunities_dropped_unavailable += 1
             log.info("dropped %s: no template in this build", o.archetype)
             continue
-        section = resolve(o.section_id)
-        if section is None:
-            report.opportunities_dropped_ungrounded += 1
-            continue
-        span = span_for_text(section, o.quote)
-        if span is None:
+        section, span = _ground(sb, resolve(o.section_id), o.quote)
+        if section is None or span is None:
             report.opportunities_dropped_ungrounded += 1
             log.info("dropped ungrounded opportunity %r", o.claim[:60])
             continue
@@ -405,10 +400,26 @@ def _apply(
             # Fall back to any concept grounded in the same section rather than
             # discarding a well-grounded proposal over a naming mismatch.
             same_section = [c.id for c in concepts if c.span.section_id == section.id]
-            if not same_section:
-                report.opportunities_dropped_unknown_concept += 1
-                continue
-            concept_id = same_section[0]
+            if same_section:
+                concept_id = same_section[0]
+            else:
+                # The opportunity is grounded by its own quote; only its concept
+                # failed to ground. Dropping it here cascaded on a real paper: two
+                # of its concepts survived, so every opportunity elsewhere was lost
+                # and the article shipped with no visuals at all.
+                concept_id = f"c{len(raw.concepts) + i:03d}"
+                concept = Concept(
+                    id=concept_id,
+                    name=o.concept_name or o.claim[:60],
+                    statement=o.claim,
+                    span=span,
+                    depends_on=[],
+                    centrality=o.centrality,
+                )
+                concepts.append(concept)
+                by_cid[concept_id] = concept
+                name_to_id[_norm(concept.name)] = concept_id
+                report.concepts_kept = len(concepts)
         candidates.append(
             VisualOpportunity(
                 id=f"o{i:03d}",
@@ -426,6 +437,9 @@ def _apply(
     report.opportunities_dropped_triage = len(candidates) - len(kept)
     report.kept_opportunities = len(kept)
 
+    # Opportunities may have grounded concepts of their own; sections list them too.
+    for section in sb.sections:
+        section.concept_ids = [c.id for c in concepts if c.span.section_id == section.id]
     sb.concepts = concepts
     sb.opportunities = kept
     sb.reading_order = _reading_order(sb, concepts)
@@ -435,6 +449,25 @@ def _apply(
     # Revalidate: the model wrote into a typed document and must not have broken it.
     Storyboard.model_validate(sb.model_dump())
     return sb, report
+
+
+def _ground(sb: Storyboard, claimed: Section | None, quote: str):
+    """``(section, span)`` for a quote: the cited section first, then every other.
+
+    Models attribute a correct quote to a neighbouring section often enough that a
+    single-section search loses real, verbatim text. The span still points at the
+    exact characters wherever they were found; only the attribution is corrected.
+    Returns ``(claimed, None)`` when the quote is nowhere, ``(None, None)`` when no
+    section was resolvable and the quote is nowhere either.
+    """
+    if claimed is not None and (span := span_for_text(claimed, quote)) is not None:
+        return claimed, span
+    for section in sb.sections:
+        if section is claimed:
+            continue
+        if (span := span_for_text(section, quote)) is not None:
+            return section, span
+    return claimed, None
 
 
 def _section_resolver(sb: Storyboard):
