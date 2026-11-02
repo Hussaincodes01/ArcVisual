@@ -14,8 +14,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+// Same order as the Python preset (arcvisual/config.py), plus Nemotron Lightning: its
+// free host lost response_format but still serves the tool calls this agent uses.
 const DEFAULT_MODELS =
-  "nvidia/nemotron-3.5-lightning:free,qwen/qwen3-235b-a22b-2507,openai/gpt-oss-120b,deepseek/deepseek-v3.2";
+  "nvidia/nemotron-3.5-super-vl:free,xingchen-agi/xing4.0-29b-a4b:free,nvidia/nemotron-3.5-lightning:free," +
+  "deepseek/deepseek-v4.1-flash-1017,minimax/minimax-m3.1-flash";
 /** Never let the agent run into the platform's 300s limit. */
 const MAX_BUDGET_S = 250;
 

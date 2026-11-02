@@ -260,12 +260,12 @@ def test_cost_is_unattributed_until_rates_are_set(reset_settings) -> None:
 def test_openrouter_leads_with_nemotron_and_asks_it_to_reason(reset_settings) -> None:
     http = _Http(_ok('{"answer": "ok"}'))
     provider = _provider(reset_settings, http)
-    assert provider.model_for(Task.CODEGEN) == "nvidia/nemotron-3.5-lightning:free"
-    assert provider.model_for(Task.CLASSIFY) == "nvidia/nemotron-3.5-lightning:free"
+    assert provider.model_for(Task.CODEGEN) == "nvidia/nemotron-3.5-super-vl:free"
+    assert provider.model_for(Task.CLASSIFY) == "nvidia/nemotron-3.5-super-vl:free"
     provider.structured(
         system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
     )
-    assert http.sent[0]["model"] == "nvidia/nemotron-3.5-lightning:free"
+    assert http.sent[0]["model"] == "nvidia/nemotron-3.5-super-vl:free"
     # Bounded: measured 15s per diagram with an 800-token cap against 66s without.
     assert http.sent[0]["reasoning"] == {"max_tokens": 800}
 
@@ -324,7 +324,7 @@ NO_SCHEMA_HOST = _Resp(
 )
 NO_HOST_AT_ALL = _Resp(
     404,
-    '{"error":{"message":"No endpoints found for nvidia/nemotron-3.5-lightning:free.",'
+    '{"error":{"message":"No endpoints found for nvidia/nemotron-3.5-super-vl:free.",'
     '"code":404}}',
 )
 
@@ -337,7 +337,7 @@ def test_a_free_endpoint_without_schema_support_is_prompted(reset_settings) -> N
     result = provider.structured(
         system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
     )
-    assert result.ok and result.model == "nvidia/nemotron-3.5-lightning:free"
+    assert result.ok and result.model == "nvidia/nemotron-3.5-super-vl:free"
     assert "response_format" not in http.sent[1]
     assert "provider" not in http.sent[1]
 
@@ -350,7 +350,7 @@ def test_a_withdrawn_free_endpoint_falls_through_to_the_next_model(
     result = provider.structured(
         system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
     )
-    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+    assert result.ok and result.model == "xingchen-agi/xing4.0-29b-a4b:free"
 
 
 FREE_DAILY_QUOTA = _Resp(
@@ -368,9 +368,9 @@ def test_a_spent_free_quota_falls_through_to_the_paid_model(reset_settings) -> N
     result = provider.structured(
         system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
     )
-    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+    assert result.ok and result.model == "xingchen-agi/xing4.0-29b-a4b:free"
     # Remembered for the rest of the process: the next call skips the spent model.
-    assert provider.model_for(Task.CLASSIFY) == "qwen/qwen3-235b-a22b-2507"
+    assert provider.model_for(Task.CLASSIFY) == "xingchen-agi/xing4.0-29b-a4b:free"
 
 
 def test_a_paid_models_daily_limit_is_not_mistaken_for_a_free_quota(
@@ -499,7 +499,7 @@ def test_a_too_slow_free_model_hands_over_to_the_next(reset_settings) -> None:
         )
     finally:
         lc._MIN_CALL_S = old
-    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+    assert result.ok and result.model == "xingchen-agi/xing4.0-29b-a4b:free"
 
 
 def test_no_call_starts_when_the_step_is_out_of_time(reset_settings) -> None:
@@ -538,7 +538,7 @@ def test_an_error_inside_the_stream_is_reported_with_its_status(reset_settings) 
     result = provider.structured(
         system=[TextBlock("s")], user="u", output_model=Out, task=Task.CODEGEN
     )
-    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+    assert result.ok and result.model == "xingchen-agi/xing4.0-29b-a4b:free"
 
 
 def test_a_silent_stream_is_cut_off_at_the_budget(reset_settings) -> None:
@@ -563,7 +563,7 @@ def test_a_silent_stream_is_cut_off_at_the_budget(reset_settings) -> None:
     finally:
         lc._MIN_CALL_S = old
     assert time.monotonic() - started < 5, "the stalled read was not cut off"
-    assert result.ok and result.model == "qwen/qwen3-235b-a22b-2507"
+    assert result.ok and result.model == "xingchen-agi/xing4.0-29b-a4b:free"
 
 
 def test_openrouter_streams_ask_for_usage(reset_settings) -> None:

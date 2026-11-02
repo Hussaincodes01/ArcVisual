@@ -360,17 +360,25 @@ LONG_CONTEXT_PRESETS: dict[str, LongContextPreset] = {
     "openrouter": LongContextPreset(
         base_url="https://openrouter.ai/api/v1",
         key_env="OPENROUTER_API_KEY",
-        # NVIDIA Nemotron 3.5 Lightning (free endpoint) leads both chains: it is the
-        # model chosen for drawing diagrams of concepts. A free endpoint is rate-limited
-        # and can be withdrawn, so the paid long-context models follow it. qwen3-235b
-        # 2507 natively serves 262,144 tokens; the others are budgeted at 131,072.
+        # Chosen by running the real analyze + diagram codegen on "Attention Is All
+        # You Need" (2026-11-02). Free endpoints lead; the paid models after them only
+        # answer when the account holds OpenRouter credits.
+        #
+        # - nemotron-3.5-super-vl:free — strict json_schema, 1M context: analysis in
+        #   85s (10 grounded concepts), each diagram valid first try in ~20s.
+        # - xing4.0-29b-a4b:free — strict json_schema, 262K: analysis in 80s.
+        # - nemotron-3.5-lightning:free is NOT here: its free host dropped
+        #   response_format, so analysis fell back to a prompted schema and timed out
+        #   at 120s — the "analyze_failed" users saw. It still serves tool calls, so
+        #   the diagram agent keeps it as a fallback (reader/app/api/diagram).
+        # - dots-3-note-preview:free also timed out, and retires 2026-12-31.
         classify=(
-            "nvidia/nemotron-3.5-lightning:free,qwen/qwen3-235b-a22b-2507,"
-            "deepseek/deepseek-v3.2,openai/gpt-oss-120b"
+            "nvidia/nemotron-3.5-super-vl:free,xingchen-agi/xing4.0-29b-a4b:free,"
+            "deepseek/deepseek-v4.1-flash-1017,minimax/minimax-m3.1-flash"
         ),
         codegen=(
-            "nvidia/nemotron-3.5-lightning:free,qwen/qwen3-235b-a22b-2507,"
-            "openai/gpt-oss-120b,deepseek/deepseek-v3.2"
+            "nvidia/nemotron-3.5-super-vl:free,xingchen-agi/xing4.0-29b-a4b:free,"
+            "deepseek/deepseek-v4.1-flash-1017,minimax/minimax-m3.1-flash"
         ),
         context_tokens=131072,
         json_schema=True,

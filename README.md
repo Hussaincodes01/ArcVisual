@@ -368,7 +368,7 @@ the full section a visual comes from (12,000 chars) instead of a 1,500-char quot
 
 | Preset | Key | Default models (fallback chain) | Context | Plan |
 |---|---|---|---|---|
-| `openrouter` | `OPENROUTER_API_KEY` | `nvidia/nemotron-3.5-lightning:free` (reasoning on), then `qwen/qwen3-235b-a22b-2507`, `deepseek/deepseek-v3.2`, `openai/gpt-oss-120b` | 131K–262K | Nemotron free endpoint first; paid fallbacks |
+| `openrouter` | `OPENROUTER_API_KEY` | `nvidia/nemotron-3.5-super-vl:free` (reasoning on), then `xingchen-agi/xing4.0-29b-a4b:free`, `deepseek/deepseek-v4.1-flash-1017`, `minimax/minimax-m3.1-flash` | 131K–1M | Free endpoints first; the paid fallbacks need OpenRouter credits |
 | `gemini` | `GEMINI_API_KEY` | `gemini-flash-latest` | ~1M (budgeted 262K) | AI Studio free tier |
 | `mistral` | `MISTRAL_API_KEY` | `mistral-medium-latest`, `mistral-small-latest` | 131K | free Experiment plan |
 | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` | 131K+ | paid, very cheap |
